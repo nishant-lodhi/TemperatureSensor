@@ -12,7 +12,8 @@ from app import config as cfg
 from app.auth import get_client_id
 from app.data.provider import get_provider
 
-dash.register_page(__name__, path="/history", name="History & Reports")
+if "/history" not in {v.get("path") for v in dash.page_registry.values()}:
+    dash.register_page(__name__, path="/history", name="History & Reports")
 
 _FONT = "'DM Sans', system-ui, sans-serif"
 
