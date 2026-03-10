@@ -1,7 +1,5 @@
 """TempMonitor Dashboard — 2-tab layout with multi-tenant auth."""
 
-import os
-
 import dash
 import dash_bootstrap_components as dbc
 from dash import Input, Output, dcc, html
