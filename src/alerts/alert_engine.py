@@ -104,7 +104,7 @@ def evaluate_thresholds(
             sustained["device_id"] = device_id
             alerts.append(sustained)
 
-    rate = sensor_state.get("rate_of_change_10m") or sensor_state.get("rate_of_change_f_per_min")
+    rate = sensor_state.get("rate_of_change_f_per_min")
     if rate is not None and feat.get("alert_rapid_change", True):
         rapid = check_rapid_change(rate, thresh)
         if rapid:

@@ -15,7 +15,7 @@ from config.tenant_config import get_device_info, get_tenant_thresholds, get_ten
 from ingestion.validator import validate_event
 from ingestion.normalizer import normalize_event
 from storage import dynamodb_store, s3_store
-from alerts.alert_engine import evaluate_critical, evaluate_thresholds, aggregate_zone_alerts, should_fire
+from alerts.alert_engine import evaluate_thresholds, aggregate_zone_alerts, should_fire
 from alerts.notifier import send_alert
 from utils import parse_timestamp
 
@@ -194,14 +194,6 @@ def _check_alerts(events: list[dict], features_cache: dict):
         state = dynamodb_store.get_sensor_state(device_id) or {}
         alerts = evaluate_thresholds(device_id, state, device_events, thresholds, features)
 
-        for evt in device_events:
-            critical = evaluate_critical(evt, thresholds, features)
-            if critical:
-                critical["device_id"] = device_id
-                critical["client_id"] = client_id
-                alerts.append(critical)
-                break
-
         zone_id = sample.get("zone_id", "unknown")
         facility_id = sample.get("facility_id", "unknown")
         for a in alerts:
@@ -211,8 +203,6 @@ def _check_alerts(events: list[dict], features_cache: dict):
         aggregated = aggregate_zone_alerts(device_alerts, zone_id, facility_id)
         active = dynamodb_store.get_active_alerts(f"{facility_id}#{zone_id}")
         for alert in aggregated:
-            if "client_id" not in alert:
-                alert["client_id"] = device_alerts[0].get("client_id", "")
             if should_fire(alert, active):
                 dynamodb_store.put_alert(f"{facility_id}#{zone_id}", alert)
                 send_alert(alert)

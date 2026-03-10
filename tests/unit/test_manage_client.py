@@ -61,6 +61,7 @@ class TestCmdAdd:
             deployment_id="deploy0001",
             client_id="client_a",
             client_name="Facility Alpha",
+            dashboard_url="",
         )
         cmd_add(args)
 
@@ -90,6 +91,7 @@ class TestCmdAdd:
             deployment_id="deploy0001",
             client_id="client_a",
             client_name="Alpha",
+            dashboard_url="",
         )
         with pytest.raises(SystemExit) as exc:
             cmd_add(args)
@@ -105,6 +107,7 @@ class TestCmdAdd:
             deployment_id="deploy0001",
             client_id="my_client",
             client_name="",
+            dashboard_url="",
         )
         cmd_add(args)
 
@@ -135,7 +138,7 @@ class TestCmdList:
             })
         }
 
-        args = Namespace(region="us-east-1", deployment_id="deploy0001")
+        args = Namespace(region="us-east-1", deployment_id="deploy0001", dashboard_url="")
         cmd_list(args)
 
         out = capsys.readouterr().out
@@ -151,7 +154,7 @@ class TestCmdList:
         mock_sm.get_paginator.return_value = mock_paginator
         mock_paginator.paginate.return_value = [{"SecretList": []}]
 
-        args = Namespace(region="us-east-1", deployment_id="deploy0001")
+        args = Namespace(region="us-east-1", deployment_id="deploy0001", dashboard_url="")
         cmd_list(args)
 
         out = capsys.readouterr().out
@@ -209,7 +212,7 @@ class TestCmdRotate:
             })
         }
 
-        args = Namespace(region="us-east-1", deployment_id="deploy0001", client_id="client_a")
+        args = Namespace(region="us-east-1", deployment_id="deploy0001", client_id="client_a", dashboard_url="")
         cmd_rotate(args)
 
         mock_sm.put_secret_value.assert_called_once()

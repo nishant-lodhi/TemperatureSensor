@@ -1,47 +1,102 @@
-# CD — Deploy to production servers.
+# CD — Deploy to any server.
 #
 # Two triggers:
-#   1. Git tag (v*) — auto-runs for all prod servers (each gated by Environment approval)
-#   2. Manual dispatch — pick any single server from the dropdown
-#
-# Each prod server has its own GitHub Environment with "Required reviewers".
-# You approve prod-a and prod-b → they deploy. Don't approve prod-c → it skips.
+#   1. Manual dispatch — pick any server from the dropdown (dev, staging, prod-*, govcloud-*)
+#   2. Git tag (v*) — auto-runs for all prod servers (each gated by Environment approval)
 #
 # Prerequisites (one-time per server):
-#   1. Create GitHub Environment matching the server name (e.g. "prod-a")
+#   1. Create GitHub Environment matching the server name (e.g. "dev", "prod-a")
 #   2. Set environment secrets: AWS_DEPLOY_ROLE_ARN, DEPLOYMENT_ID
-#   3. Set environment variable: AWS_REGION (default: us-east-1)
-#   4. For prod: add "Required reviewers" protection rule
+#   3. Set environment variable: AWS_REGION (e.g. us-west-2, us-gov-west-1)
+#   4. For prod environments: add "Required reviewers" protection rule
 #   5. Optionally add "Wait timer" (e.g. 5 minutes) for extra safety
+#
+# Until you set up these prerequisites, this workflow will not run.
+# You can continue deploying manually with `sam deploy` as before.
 
-name: CD — Deploy to Production
+name: CD — Deploy
 
 on:
-  # Trigger 1: Tag push (e.g. v1.0.0, v1.2.3-rc1)
   push:
     tags:
       - "v*"
 
-  # Trigger 2: Manual dispatch for any server
   workflow_dispatch:
     inputs:
       server:
-        description: "Target server"
+        description: "Target server to deploy to"
         required: true
         type: choice
-        options: [dev, staging, prod-a, prod-b, prod-c, govcloud-dev, govcloud-prod]
+        options:
+          - dev
+          - staging
+          - prod-a
+          - prod-b
+          - prod-c
+          - govcloud-dev
+          - govcloud-prod
 
 permissions:
   id-token: write
   contents: read
 
-# ── Tag-triggered production deployments ─────────────────────────────────────
-# Each job is independent and gated by its own GitHub Environment.
-# Approve the ones you want; ignore the rest (they time out harmlessly).
-
 jobs:
 
-  # ── Run tests first (tag trigger only) ─────────────────────────────────────
+  # ═══════════════════════════════════════════════════════════════════════════
+  #  MANUAL DISPATCH — deploy to any single server
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  deploy-manual:
+    name: Deploy to ${{ github.event.inputs.server }}
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.server }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r src/requirements.txt -r dashboard/requirements.txt -r requirements-dev.txt
+          pip install aws-sam-cli
+
+      - name: Run tests
+        run: make test
+
+      - name: Lint
+        run: make lint
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION || 'us-west-2' }}
+
+      - name: SAM Build + Deploy
+        run: |
+          sam build --template infra/template.yaml
+          sam deploy \
+            --config-env "${{ github.event.inputs.server }}" \
+            --config-file infra/samconfig.toml \
+            --no-fail-on-empty-changeset \
+            --no-confirm-changeset \
+            --parameter-overrides "DeploymentId=${{ secrets.DEPLOYMENT_ID }}"
+
+      - name: Show stack outputs
+        run: |
+          aws cloudformation describe-stacks \
+            --stack-name "TempMonitor-${{ github.event.inputs.server }}" \
+            --query 'Stacks[0].Outputs' --output table || true
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  #  TAG TRIGGER (v*) — deploy to production servers with approval gates
+  # ═══════════════════════════════════════════════════════════════════════════
+
   test:
     name: Pre-deploy Tests
     if: startsWith(github.ref, 'refs/tags/v')
@@ -70,7 +125,6 @@ jobs:
           pip install aws-sam-cli
           sam validate --template infra/template.yaml --lint
 
-  # ── Prod-A (tag trigger) ───────────────────────────────────────────────────
   deploy-prod-a:
     name: Deploy to prod-a
     needs: [test]
@@ -88,7 +142,7 @@ jobs:
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
-          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
+          aws-region: ${{ vars.AWS_REGION || 'us-west-2' }}
       - name: SAM Build + Deploy
         run: |
           sam build --template infra/template.yaml
@@ -104,7 +158,6 @@ jobs:
             --stack-name TempMonitor-prod-a \
             --query 'Stacks[0].Outputs' --output table || true
 
-  # ── Prod-B (tag trigger) ───────────────────────────────────────────────────
   deploy-prod-b:
     name: Deploy to prod-b
     needs: [test]
@@ -122,7 +175,7 @@ jobs:
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
-          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
+          aws-region: ${{ vars.AWS_REGION || 'us-west-2' }}
       - name: SAM Build + Deploy
         run: |
           sam build --template infra/template.yaml
@@ -138,7 +191,6 @@ jobs:
             --stack-name TempMonitor-prod-b \
             --query 'Stacks[0].Outputs' --output table || true
 
-  # ── Prod-C (tag trigger) ───────────────────────────────────────────────────
   deploy-prod-c:
     name: Deploy to prod-c
     needs: [test]
@@ -156,7 +208,7 @@ jobs:
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
-          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
+          aws-region: ${{ vars.AWS_REGION || 'us-west-2' }}
       - name: SAM Build + Deploy
         run: |
           sam build --template infra/template.yaml
@@ -172,7 +224,6 @@ jobs:
             --stack-name TempMonitor-prod-c \
             --query 'Stacks[0].Outputs' --output table || true
 
-  # ── GovCloud Prod (tag trigger) ────────────────────────────────────────────
   deploy-govcloud-prod:
     name: Deploy to govcloud-prod
     needs: [test]
@@ -205,90 +256,3 @@ jobs:
           aws cloudformation describe-stacks \
             --stack-name TempMonitor-govcloud-prod \
             --query 'Stacks[0].Outputs' --output table || true
-
-  # ── Manual Dispatch (any server) ───────────────────────────────────────────
-  deploy-manual:
-    name: Manual Deploy to ${{ github.event.inputs.server }}
-    if: github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    environment: ${{ github.event.inputs.server }}
-    permissions:
-      id-token: write
-      contents: read
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-          cache: pip
-
-      - name: Install dependencies + SAM CLI
-        run: |
-          pip install --upgrade pip
-          pip install -r src/requirements.txt -r dashboard/requirements.txt -r requirements-dev.txt
-          pip install aws-sam-cli
-
-      - name: Run all tests
-        run: make test
-
-      - name: Lint
-        run: make lint
-
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
-          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
-
-      - name: SAM Build
-        run: sam build --template infra/template.yaml
-
-      - name: SAM Deploy
-        run: |
-          SERVER="${{ github.event.inputs.server }}"
-          sam deploy \
-            --config-env "${SERVER}" \
-            --config-file infra/samconfig.toml \
-            --no-fail-on-empty-changeset \
-            --no-confirm-changeset \
-            --parameter-overrides "DeploymentId=${{ secrets.DEPLOYMENT_ID }}"
-
-      - name: Show stack outputs
-        run: |
-          SERVER="${{ github.event.inputs.server }}"
-          aws cloudformation describe-stacks \
-            --stack-name "TempMonitor-${SERVER}" \
-            --query 'Stacks[0].Outputs' --output table || true
-
-      - name: Post-deploy health check
-        run: |
-          PREFIX="temp-sensor"
-          DEPLOY_ID="${{ secrets.DEPLOYMENT_ID }}"
-          SERVER="${{ github.event.inputs.server }}"
-
-          # Determine environment from server name
-          case "$SERVER" in
-            dev|govcloud-dev) ENV="dev" ;;
-            staging)          ENV="staging" ;;
-            *)                ENV="prod" ;;
-          esac
-
-          echo "--- Lambda Functions ---"
-          for fn in "batch-processor" "critical-alert" "scheduled-processor"; do
-            FUNC="${PREFIX}-${fn}-${DEPLOY_ID}-${ENV}"
-            echo "Checking ${FUNC}..."
-            aws lambda get-function-configuration \
-              --function-name "$FUNC" \
-              --query '{State: State, Runtime: Runtime}' \
-              --output table 2>&1 || echo "  WARN: ${FUNC} not found"
-          done
-
-          echo "--- DynamoDB Tables ---"
-          for tbl in "sensor-data" "alerts" "platform-config"; do
-            TABLE="${PREFIX}-${tbl}-${DEPLOY_ID}-${ENV}"
-            STATUS=$(aws dynamodb describe-table --table-name "$TABLE" \
-              --query 'Table.TableStatus' --output text 2>&1) || echo "  WARN: ${TABLE} not found"
-            echo "${TABLE}: ${STATUS}"
-          done
-          echo "=== Health check complete ==="

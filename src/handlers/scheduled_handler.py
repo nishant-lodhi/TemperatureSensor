@@ -191,7 +191,6 @@ def _to_reading_dicts(raw_items: list[dict]) -> list[dict]:
 def _fire_alerts(alerts: list[dict], state: dict, features: dict | None = None):
     for alert in alerts:
         fz = f"{state.get('facility_id', 'unknown')}#{state.get('zone_id', 'unknown')}"
-        alert.setdefault("client_id", state.get("client_id", ""))
         active = dynamodb_store.get_active_alerts(fz)
         if should_fire(alert, active):
             alert["facility_zone"] = fz

@@ -26,11 +26,9 @@ from handlers.synthetic_generator import (
 class TestStableMAC:
     def test_format(self):
         mac = _stable_mac(0)
-        parts = mac.split(":")
-        assert len(parts) == 6
-        for p in parts:
-            assert len(p) == 2
-            int(p, 16)
+        assert mac.startswith("C3")
+        assert len(mac) == 12
+        int(mac, 16)
 
     def test_deterministic(self):
         assert _stable_mac(5) == _stable_mac(5)
