@@ -1,0 +1,1 @@
+"""TempMonitor Dashboard — application package."""

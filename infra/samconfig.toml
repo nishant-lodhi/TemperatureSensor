@@ -1,0 +1,67 @@
+# SAM deploy configuration — one section per server/environment.
+# Usage: sam deploy --config-env dev --config-file infra/samconfig.toml
+#
+# Generate a DeploymentId (run once per server):
+#   python3 -c "import uuid; print(uuid.uuid4().hex[:10])"
+#
+# Key parameters:
+#   SyntheticMode  = true  → creates Synthetic Generator Lambda (fake data)
+#   EnableIoTRule  = true  → creates IoT Rule + BLE Adapter Lambda (real sensors)
+#   IoTTopicPattern        → MQTT topic for real sensors
+
+version = 0.1
+
+[default.build.parameters]
+template = "infra/template.yaml"
+
+[default.deploy.parameters]
+resolve_s3 = true
+capabilities = "CAPABILITY_IAM CAPABILITY_NAMED_IAM"
+region = "us-west-2"
+
+# ── DEV (standard AWS — synthetic data) ─────────────────────────────────────
+[dev.deploy.parameters]
+stack_name = "TempMonitor-saas-dev"
+resolve_s3 = true
+capabilities = "CAPABILITY_IAM CAPABILITY_NAMED_IAM"
+parameter_overrides = "Environment=dev DeploymentId=244d4b8211 ProjectPrefix=temp-sensor SyntheticMode=true EnableIoTRule=false"
+confirm_changeset = false
+region = "us-west-2"
+
+# # ── STAGING (standard AWS — synthetic data) ──────────────────────────────────
+# [staging.deploy.parameters]
+# stack_name = "TempMonitor-staging"
+# parameter_overrides = "Environment=staging DeploymentId=stg00dep01 ProjectPrefix=temp-sensor SyntheticMode=true EnableIoTRule=false"
+# confirm_changeset = true
+
+# # ── PROD-A (standard AWS) ───────────────────────────────────────────────────
+# [prod-a.deploy.parameters]
+# stack_name = "TempMonitor-prod-a"
+# parameter_overrides = "Environment=prod DeploymentId=CHANGEME01 ProjectPrefix=temp-sensor SyntheticMode=false EnableIoTRule=true IoTTopicPattern=sensors/temp"
+# confirm_changeset = true
+
+# # ── PROD-B (standard AWS) ───────────────────────────────────────────────────
+# [prod-b.deploy.parameters]
+# stack_name = "TempMonitor-prod-b"
+# parameter_overrides = "Environment=prod DeploymentId=CHANGEME02 ProjectPrefix=temp-sensor SyntheticMode=false EnableIoTRule=true IoTTopicPattern=sensors/temp"
+# confirm_changeset = true
+
+# # ── PROD-C (standard AWS) ───────────────────────────────────────────────────
+# [prod-c.deploy.parameters]
+# stack_name = "TempMonitor-prod-c"
+# parameter_overrides = "Environment=prod DeploymentId=CHANGEME03 ProjectPrefix=temp-sensor SyntheticMode=false EnableIoTRule=true IoTTopicPattern=sensors/temp"
+# confirm_changeset = true
+
+# # ── GOVCLOUD DEV (us-gov-west-1 — synthetic data for testing) ───────────────
+# [govcloud-dev.deploy.parameters]
+# stack_name = "TempMonitor-govcloud-dev"
+# region = "us-gov-west-1"
+# parameter_overrides = "Environment=dev DeploymentId=CHANGEME04 ProjectPrefix=temp-sensor SyntheticMode=true EnableIoTRule=false"
+# confirm_changeset = false
+
+# # ── GOVCLOUD PROD (us-gov-west-1 — real BLE sensors) ────────────────────────
+# [govcloud-prod.deploy.parameters]
+# stack_name = "TempMonitor-govcloud-prod"
+# region = "us-gov-west-1"
+# parameter_overrides = "Environment=prod DeploymentId=CHANGEME05 ProjectPrefix=temp-sensor SyntheticMode=false EnableIoTRule=true IoTTopicPattern=/gw/+/lpsogateway1"
+# confirm_changeset = true

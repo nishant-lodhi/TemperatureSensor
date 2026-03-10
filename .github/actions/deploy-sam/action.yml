@@ -1,0 +1,138 @@
+# Composite action: centralized SAM deploy logic.
+# All environments deploy the same way — only credentials and params change.
+# Inspired by: one action, three environments (tag-based prod, auto dev/staging).
+
+name: "Deploy SAM Stack"
+description: "Build, deploy, and health-check a SAM stack for any environment"
+
+inputs:
+  environment:
+    description: "Target environment (dev | staging | prod)"
+    required: true
+  deployment_id:
+    description: "10-char deployment identifier"
+    required: true
+  aws_access_key_id:
+    description: "AWS access key"
+    required: true
+  aws_secret_access_key:
+    description: "AWS secret key"
+    required: true
+  aws_region:
+    description: "AWS region"
+    required: false
+    default: "us-east-1"
+  project_prefix:
+    description: "Resource name prefix"
+    required: false
+    default: "temp-sensor"
+  confirm_changeset:
+    description: "Require manual changeset approval (true for staging/prod)"
+    required: false
+    default: "false"
+  sam_config_env:
+    description: "SAM config-env name (matches samconfig.toml section)"
+    required: false
+    default: ""
+
+runs:
+  using: "composite"
+  steps:
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ inputs.aws_access_key_id }}
+        aws-secret-access-key: ${{ inputs.aws_secret_access_key }}
+        aws-region: ${{ inputs.aws_region }}
+
+    - name: Setup Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.10"
+
+    - name: Setup SAM CLI
+      uses: aws-actions/setup-sam@v2
+
+    - name: Install dependencies
+      shell: bash
+      run: pip install -r requirements-dev.txt
+
+    - name: Run unit tests
+      shell: bash
+      run: python -m pytest tests/ -v --tb=short
+
+    - name: SAM build
+      shell: bash
+      run: sam build --use-container
+
+    - name: SAM deploy
+      shell: bash
+      run: |
+        CONFIG_ENV="${{ inputs.sam_config_env }}"
+        if [ -z "$CONFIG_ENV" ]; then
+          CONFIG_ENV="${{ inputs.environment }}"
+        fi
+
+        CONFIRM_FLAG=""
+        if [ "${{ inputs.confirm_changeset }}" = "true" ]; then
+          CONFIRM_FLAG="--confirm-changeset"
+        else
+          CONFIRM_FLAG="--no-confirm-changeset"
+        fi
+
+        sam deploy \
+          --config-env "$CONFIG_ENV" \
+          --parameter-overrides \
+            "Environment=${{ inputs.environment }}" \
+            "DeploymentId=${{ inputs.deployment_id }}" \
+            "ProjectPrefix=${{ inputs.project_prefix }}" \
+          $CONFIRM_FLAG \
+          --no-fail-on-empty-changeset
+
+    - name: Health check — verify Lambda functions
+      shell: bash
+      run: |
+        ENV="${{ inputs.environment }}"
+        PREFIX="${{ inputs.project_prefix }}"
+        DEPLOY_ID="${{ inputs.deployment_id }}"
+
+        echo "--- Health Check: Lambda Functions ---"
+        for fn in "batch-processor" "critical-alert" "scheduled-processor"; do
+          FUNC_NAME="${PREFIX}-${fn}-${DEPLOY_ID}-${ENV}"
+          echo "Checking $FUNC_NAME ..."
+          CONFIG=$(aws lambda get-function-configuration \
+            --function-name "$FUNC_NAME" \
+            --query '{State: State, LastModified: LastModified, Runtime: Runtime}' \
+            --output table 2>&1) || { echo "FAIL: $FUNC_NAME not found"; exit 1; }
+          echo "$CONFIG"
+        done
+
+        echo "--- Health Check: DynamoDB Tables ---"
+        for tbl in "platform-config" "sensor-data" "alerts"; do
+          TABLE_NAME="${PREFIX}-${tbl}-${DEPLOY_ID}-${ENV}"
+          echo "Checking $TABLE_NAME ..."
+          STATUS=$(aws dynamodb describe-table \
+            --table-name "$TABLE_NAME" \
+            --query 'Table.TableStatus' \
+            --output text 2>&1) || { echo "FAIL: $TABLE_NAME not found"; exit 1; }
+          echo "  Status: $STATUS"
+          if [ "$STATUS" != "ACTIVE" ]; then
+            echo "FAIL: Table $TABLE_NAME is $STATUS, expected ACTIVE"
+            exit 1
+          fi
+        done
+
+        echo "--- Health Check: S3 Bucket ---"
+        BUCKET="${PREFIX}-data-lake-${DEPLOY_ID}-${ENV}"
+        aws s3api head-bucket --bucket "$BUCKET" 2>&1 || { echo "FAIL: Bucket $BUCKET not found"; exit 1; }
+        echo "Bucket $BUCKET exists"
+
+        echo "--- Health Check: Kinesis Stream ---"
+        STREAM="${PREFIX}-sensor-stream-${DEPLOY_ID}-${ENV}"
+        STREAM_STATUS=$(aws kinesis describe-stream \
+          --stream-name "$STREAM" \
+          --query 'StreamDescription.StreamStatus' \
+          --output text 2>&1) || { echo "FAIL: Stream $STREAM not found"; exit 1; }
+        echo "Stream $STREAM status: $STREAM_STATUS"
+
+        echo "=== All health checks passed ==="

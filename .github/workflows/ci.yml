@@ -1,0 +1,211 @@
+# CI — runs on every push and every pull request.
+# Tests backend + dashboard, validates SAM template, checks code quality.
+#
+# Branch strategy:
+#   feature/* → PR to develop  (CI runs on PR)
+#   develop   → push triggers  (CI runs + auto-deploy to dev)
+#   main      → push triggers  (CI runs + auto-deploy to staging)
+#   hotfix/*  → PR to main     (CI runs on PR)
+
+name: CI — Test & Lint
+
+on:
+  pull_request:
+    branches: [main, develop]
+  push:
+    branches: [main, develop]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ── Backend Tests ──────────────────────────────────────────────────────────
+  backend:
+    name: Backend Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r src/requirements.txt -r requirements-dev.txt
+
+      - name: Run tests
+        run: make test-backend
+
+      - name: Check module sizes (max ~300 lines)
+        run: |
+          FAIL=0
+          for f in $(find src -name "*.py" ! -name "__init__.py"); do
+            LINES=$(wc -l < "$f")
+            if [ "$LINES" -gt 350 ]; then
+              echo "WARN: $f has $LINES lines (limit ~300)"
+              FAIL=1
+            fi
+          done
+          [ "$FAIL" -eq 0 ] || exit 1
+
+  # ── Dashboard Tests ────────────────────────────────────────────────────────
+  dashboard:
+    name: Dashboard Tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r dashboard/requirements.txt -r requirements-dev.txt
+
+      - name: Lint
+        run: make lint-dashboard
+
+      - name: Test
+        run: make test-dashboard
+
+  # ── SAM Template Validation ────────────────────────────────────────────────
+  validate-template:
+    name: Validate SAM Template
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install SAM CLI
+        run: pip install aws-sam-cli
+
+      - name: Validate template syntax
+        run: sam validate --template infra/template.yaml --lint
+
+  # ── Auto-Deploy to Dev (on push to develop) ────────────────────────────────
+  deploy-dev:
+    name: Auto-Deploy to Dev
+    needs: [backend, dashboard, validate-template]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
+    runs-on: ubuntu-latest
+    environment: dev
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install SAM CLI
+        run: pip install aws-sam-cli
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
+
+      - name: SAM Build
+        run: sam build --template infra/template.yaml
+
+      - name: SAM Deploy to Dev
+        run: |
+          sam deploy \
+            --config-env dev \
+            --config-file infra/samconfig.toml \
+            --no-fail-on-empty-changeset \
+            --no-confirm-changeset \
+            --parameter-overrides "DeploymentId=${{ secrets.DEPLOYMENT_ID }}"
+
+      - name: Show stack outputs
+        run: |
+          aws cloudformation describe-stacks \
+            --stack-name TempMonitor-dev \
+            --query 'Stacks[0].Outputs' \
+            --output table || true
+
+      - name: Post-deploy health check
+        run: |
+          PREFIX="temp-sensor"
+          DEPLOY_ID="${{ secrets.DEPLOYMENT_ID }}"
+          ENV="dev"
+
+          echo "--- Lambda Functions ---"
+          for fn in "batch-processor" "critical-alert" "scheduled-processor" "dashboard"; do
+            FUNC="${PREFIX}-${fn}-${DEPLOY_ID}-${ENV}"
+            echo "Checking ${FUNC}..."
+            aws lambda get-function-configuration \
+              --function-name "$FUNC" \
+              --query '{State: State, Runtime: Runtime}' \
+              --output table 2>&1 || echo "  WARN: ${FUNC} not found (may be expected)"
+          done
+
+          echo "--- DynamoDB Tables ---"
+          for tbl in "sensor-data" "alerts" "platform-config"; do
+            TABLE="${PREFIX}-${tbl}-${DEPLOY_ID}-${ENV}"
+            STATUS=$(aws dynamodb describe-table --table-name "$TABLE" \
+              --query 'Table.TableStatus' --output text 2>&1) || echo "  WARN: ${TABLE} not found"
+            echo "${TABLE}: ${STATUS}"
+          done
+
+          echo "=== Health check complete ==="
+
+  # ── Auto-Deploy to Staging (on push to main) ──────────────────────────────
+  deploy-staging:
+    name: Auto-Deploy to Staging
+    needs: [backend, dashboard, validate-template]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: staging
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install SAM CLI
+        run: pip install aws-sam-cli
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
+
+      - name: SAM Build
+        run: sam build --template infra/template.yaml
+
+      - name: SAM Deploy to Staging
+        run: |
+          sam deploy \
+            --config-env staging \
+            --config-file infra/samconfig.toml \
+            --no-fail-on-empty-changeset \
+            --no-confirm-changeset \
+            --parameter-overrides "DeploymentId=${{ secrets.DEPLOYMENT_ID }}"
+
+      - name: Show stack outputs
+        run: |
+          aws cloudformation describe-stacks \
+            --stack-name TempMonitor-staging \
+            --query 'Stacks[0].Outputs' \
+            --output table || true

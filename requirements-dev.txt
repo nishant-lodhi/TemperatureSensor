@@ -1,0 +1,10 @@
+# Shared dev/test dependencies for backend + dashboard
+boto3
+numpy
+scipy
+pandas
+moto[all]>=5.0
+pytest>=8.0
+pytest-cov
+ruff>=0.1
+mypy>=1.5
