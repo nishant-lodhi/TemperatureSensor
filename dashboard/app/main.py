@@ -9,12 +9,10 @@ from flask import Response, g, make_response, redirect, request
 
 from app import config as cfg
 
-_PAGES_DIR = os.path.join(os.path.dirname(__file__), "pages")
-
 app = dash.Dash(
     __name__,
     use_pages=True,
-    pages_folder=_PAGES_DIR,
+    pages_folder="pages",
     external_stylesheets=[
         dbc.themes.DARKLY,
         "https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&display=swap",
