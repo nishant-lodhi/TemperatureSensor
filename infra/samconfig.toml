@@ -1,67 +1,157 @@
-# SAM deploy configuration — one section per server/environment.
-# Usage: sam deploy --config-env dev --config-file infra/samconfig.toml
+# SAM deploy configuration — one section per server.
+#
+# Architecture:
+#   - One Lambda (singleton) per server
+#   - Multiple clients per server (data isolated by client_id)
+#   - Processing shared, data segregated
+#
+# Server → Client mapping:
+#   server1 (prod-a)  → client A, client B
+#   server2 (prod-b)  → client A
+#   server3 (prod-c)  → client A, client B, client C
+#   serverX (dev)     → dev/staging shared
+#
+# Clients are managed via: scripts/manage_client.py (Secrets Manager)
+# Each client gets a unique access URL: /connect/{token}
+#
+# Usage:
+#   sam deploy --config-env dev --config-file infra/samconfig.toml
 #
 # Generate a DeploymentId (run once per server):
 #   python3 -c "import uuid; print(uuid.uuid4().hex[:10])"
-#
-# Key parameters:
-#   SyntheticMode  = true  → creates Synthetic Generator Lambda (fake data)
-#   EnableIoTRule  = true  → creates IoT Rule + BLE Adapter Lambda (real sensors)
-#   IoTTopicPattern        → MQTT topic for real sensors
 
 version = 0.1
 
+# ── Shared defaults ──────────────────────────────────────────────────────────
 [default.build.parameters]
 template = "infra/template.yaml"
 
 [default.deploy.parameters]
 resolve_s3 = true
-capabilities = "CAPABILITY_IAM CAPABILITY_NAMED_IAM"
+capabilities = "CAPABILITY_IAM"
 region = "us-west-2"
 
-# ── DEV (standard AWS — synthetic data) ─────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+#  NON-PRODUCTION — serverX (shared dev/staging)
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── DEV ──────────────────────────────────────────────────────────────────────
 [dev.deploy.parameters]
 stack_name = "TempMonitor-saas-dev"
 resolve_s3 = true
-capabilities = "CAPABILITY_IAM CAPABILITY_NAMED_IAM"
-parameter_overrides = "Environment=dev DeploymentId=244d4b8211 ProjectPrefix=temp-sensor SyntheticMode=true EnableIoTRule=false"
+capabilities = "CAPABILITY_IAM"
 confirm_changeset = false
 region = "us-west-2"
+parameter_overrides = """
+  Environment=dev
+  DeploymentId=244d4b8211
+  ProjectPrefix=temp-sensor
+  DataSource=mysql
+  MysqlHost=demo-new-db-cluster.cluster-ro-cyxsij4cwahs.us-east-1.rds.amazonaws.com
+  MysqlPort=3306
+  MysqlUser=Demo_aurora
+  MysqlDatabase=Demo_aurora
+"""
+# MysqlPassword passed via: --parameter-overrides "MysqlPassword=xxx"
+# or via GitHub secret in CD workflow
 
-# # ── STAGING (standard AWS — synthetic data) ──────────────────────────────────
+# ── STAGING ──────────────────────────────────────────────────────────────────
 # [staging.deploy.parameters]
-# stack_name = "TempMonitor-staging"
-# parameter_overrides = "Environment=staging DeploymentId=stg00dep01 ProjectPrefix=temp-sensor SyntheticMode=true EnableIoTRule=false"
+# stack_name = "TempMonitor-saas-staging"
+# resolve_s3 = true
+# capabilities = "CAPABILITY_IAM"
 # confirm_changeset = true
+# region = "us-west-2"
+# parameter_overrides = """
+#   Environment=staging
+#   DeploymentId=CHANGEME01
+#   ProjectPrefix=temp-sensor
+#   DataSource=mysql
+#   MysqlHost=your-staging-aurora.rds.amazonaws.com
+#   MysqlPort=3306
+#   MysqlUser=your_user
+#   MysqlDatabase=your_db
+# """
 
-# # ── PROD-A (standard AWS) ───────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+#  PRODUCTION — one section per server (singleton Lambda, multi-client)
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── server1 / prod-a → clients: A, B ────────────────────────────────────────
 # [prod-a.deploy.parameters]
-# stack_name = "TempMonitor-prod-a"
-# parameter_overrides = "Environment=prod DeploymentId=CHANGEME01 ProjectPrefix=temp-sensor SyntheticMode=false EnableIoTRule=true IoTTopicPattern=sensors/temp"
+# stack_name = "TempMonitor-saas-prod-a"
+# resolve_s3 = true
+# capabilities = "CAPABILITY_IAM"
 # confirm_changeset = true
+# region = "us-west-2"
+# parameter_overrides = """
+#   Environment=prod
+#   DeploymentId=CHANGEME02
+#   ProjectPrefix=temp-sensor
+#   DataSource=mysql
+#   MysqlHost=prod-a-aurora.rds.amazonaws.com
+#   MysqlPort=3306
+#   MysqlUser=prod_reader
+#   MysqlDatabase=sensor_data
+# """
+# After deploy, add clients:
+#   python scripts/manage_client.py add --deployment-id CHANGEME02 --client-id client_a --client-name "Client A" --region us-west-2
+#   python scripts/manage_client.py add --deployment-id CHANGEME02 --client-id client_b --client-name "Client B" --region us-west-2
 
-# # ── PROD-B (standard AWS) ───────────────────────────────────────────────────
+# ── server2 / prod-b → clients: A ───────────────────────────────────────────
 # [prod-b.deploy.parameters]
-# stack_name = "TempMonitor-prod-b"
-# parameter_overrides = "Environment=prod DeploymentId=CHANGEME02 ProjectPrefix=temp-sensor SyntheticMode=false EnableIoTRule=true IoTTopicPattern=sensors/temp"
+# stack_name = "TempMonitor-saas-prod-b"
+# resolve_s3 = true
+# capabilities = "CAPABILITY_IAM"
 # confirm_changeset = true
+# region = "us-east-1"
+# parameter_overrides = """
+#   Environment=prod
+#   DeploymentId=CHANGEME03
+#   ProjectPrefix=temp-sensor
+#   DataSource=mysql
+#   MysqlHost=prod-b-aurora.rds.amazonaws.com
+#   MysqlPort=3306
+#   MysqlUser=prod_reader
+#   MysqlDatabase=sensor_data
+# """
 
-# # ── PROD-C (standard AWS) ───────────────────────────────────────────────────
+# ── server3 / prod-c → clients: A, B, C ─────────────────────────────────────
 # [prod-c.deploy.parameters]
-# stack_name = "TempMonitor-prod-c"
-# parameter_overrides = "Environment=prod DeploymentId=CHANGEME03 ProjectPrefix=temp-sensor SyntheticMode=false EnableIoTRule=true IoTTopicPattern=sensors/temp"
+# stack_name = "TempMonitor-saas-prod-c"
+# resolve_s3 = true
+# capabilities = "CAPABILITY_IAM"
 # confirm_changeset = true
+# region = "us-west-2"
+# parameter_overrides = """
+#   Environment=prod
+#   DeploymentId=CHANGEME04
+#   ProjectPrefix=temp-sensor
+#   DataSource=mysql
+#   MysqlHost=prod-c-aurora.rds.amazonaws.com
+#   MysqlPort=3306
+#   MysqlUser=prod_reader
+#   MysqlDatabase=sensor_data
+# """
 
-# # ── GOVCLOUD DEV (us-gov-west-1 — synthetic data for testing) ───────────────
-# [govcloud-dev.deploy.parameters]
-# stack_name = "TempMonitor-govcloud-dev"
-# region = "us-gov-west-1"
-# parameter_overrides = "Environment=dev DeploymentId=CHANGEME04 ProjectPrefix=temp-sensor SyntheticMode=true EnableIoTRule=false"
-# confirm_changeset = false
+# ══════════════════════════════════════════════════════════════════════════════
+#  GOVCLOUD
+# ══════════════════════════════════════════════════════════════════════════════
 
-# # ── GOVCLOUD PROD (us-gov-west-1 — real BLE sensors) ────────────────────────
+# ── GovCloud Prod ────────────────────────────────────────────────────────────
 # [govcloud-prod.deploy.parameters]
-# stack_name = "TempMonitor-govcloud-prod"
-# region = "us-gov-west-1"
-# parameter_overrides = "Environment=prod DeploymentId=CHANGEME05 ProjectPrefix=temp-sensor SyntheticMode=false EnableIoTRule=true IoTTopicPattern=/gw/+/lpsogateway1"
+# stack_name = "TempMonitor-saas-govcloud"
+# resolve_s3 = true
+# capabilities = "CAPABILITY_IAM"
 # confirm_changeset = true
+# region = "us-gov-west-1"
+# parameter_overrides = """
+#   Environment=prod
+#   DeploymentId=CHANGEME05
+#   ProjectPrefix=temp-sensor
+#   DataSource=mysql
+#   MysqlHost=govcloud-aurora.rds.amazonaws.com
+#   MysqlPort=3306
+#   MysqlUser=prod_reader
+#   MysqlDatabase=sensor_data
+# """

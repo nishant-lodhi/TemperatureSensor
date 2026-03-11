@@ -243,7 +243,7 @@ class TestValidateTokenHint:
 
 class TestFlaskContextHelpers:
     def test_get_client_id_returns_value(self):
-        assert get_client_id() == "demo_client_1"
+        assert get_client_id() == "test_client"
 
     def test_get_client_name_returns_value(self):
-        assert get_client_name() == "Demo Facility"
+        assert get_client_name() == "Test Facility"

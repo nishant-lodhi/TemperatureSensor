@@ -1,9 +1,8 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
 Description: >
-  TempMonitor — Unified stack: backend (IoT ingestion, analytics, alerts)
-  + dashboard (Dash/Flask via API Gateway). Deploys identically to standard
-  AWS and GovCloud with two deploy-time parameters controlling all differences.
+  TempMonitor — Dashboard stack with hybrid data (MySQL/Parquet),
+  DynamoDB alerts, and multi-tenant auth.
 
 Parameters:
   Environment:
@@ -12,45 +11,52 @@ Parameters:
     Default: dev
   DeploymentId:
     Type: String
-    Description: "Unique 10-char ID per server. Generate: python3 -c \"import uuid; print(uuid.uuid4().hex[:10])\""
+    Description: "Unique 10-char ID per server."
     AllowedPattern: "[a-z0-9]{10}"
-    ConstraintDescription: "Exactly 10 lowercase alphanumeric characters."
     Default: "0000000000"
   ProjectPrefix:
     Type: String
     Default: temp-sensor
-  KinesisShardCount:
-    Type: Number
-    Default: 1
   CookieSecret:
     Type: String
-    Description: "HMAC signing key for dashboard auth cookies. Auto-generated if left blank."
     Default: ""
     NoEcho: true
-  SyntheticMode:
+  MysqlHost:
     Type: String
-    AllowedValues: ["true", "false"]
-    Default: "true"
-    Description: "Enable synthetic data generator (true for dev, false for prod with real sensors)"
-  EnableIoTRule:
+    Default: ""
+  MysqlPort:
     Type: String
-    AllowedValues: ["true", "false"]
-    Default: "false"
-    Description: "Create IoT Rule + Adapter for real BLE sensor data (true for prod)"
-  IoTTopicPattern:
+    Default: "3306"
+  MysqlUser:
     Type: String
-    Default: "sensors/temp"
-    Description: "MQTT topic for IoT Rule (e.g. /gw/+/lpsogateway1 for LPSO gateway)"
-  SyntheticSensorCount:
-    Type: Number
-    Default: 20
-    Description: "Number of fake sensors when SyntheticMode=true"
+    Default: ""
+    NoEcho: true
+  MysqlPassword:
+    Type: String
+    Default: ""
+    NoEcho: true
+  MysqlDatabase:
+    Type: String
+    Default: "Demo_aurora"
+  DataSource:
+    Type: String
+    AllowedValues: ["mysql", "parquet", "hybrid"]
+    Default: "mysql"
+  ParquetBucket:
+    Type: String
+    Default: ""
+  ParquetPrefix:
+    Type: String
+    Default: "sensor-data/"
+  NoteLambdaArn:
+    Type: String
+    Description: "ARN of Lambda to invoke for officer notes (optional)"
+    Default: ""
 
 Conditions:
   GenerateCookieSecret: !Equals [!Ref CookieSecret, ""]
-  IsSyntheticMode: !Equals [!Ref SyntheticMode, "true"]
-  IsIoTRuleEnabled: !Equals [!Ref EnableIoTRule, "true"]
-  IsGenericIoT: !Not [!Equals [!Ref EnableIoTRule, "true"]]
+  HasParquetBucket: !Not [!Equals [!Ref ParquetBucket, ""]]
+  HasNoteLambda: !Not [!Equals [!Ref NoteLambdaArn, ""]]
 
 Globals:
   Function:
@@ -63,421 +69,33 @@ Globals:
         ENVIRONMENT: !Ref Environment
         DEPLOYMENT_ID: !Ref DeploymentId
 
-# =============================================================================
-#  RESOURCES
-# =============================================================================
 Resources:
 
-  # ---------------------------------------------------------------------------
-  #  Backend: Shared Dependencies Layer
-  # ---------------------------------------------------------------------------
-  SharedDependenciesLayer:
-    Type: AWS::Serverless::LayerVersion
-    Properties:
-      LayerName: !Sub "${ProjectPrefix}-shared-deps-${DeploymentId}-${Environment}"
-      ContentUri: ../src/
-      CompatibleRuntimes: [python3.11]
-      CompatibleArchitectures: [x86_64]
-
-  # ---------------------------------------------------------------------------
-  #  Backend: Kinesis Data Stream (universal entry point)
-  # ---------------------------------------------------------------------------
-  SensorDataStream:
-    Type: AWS::Kinesis::Stream
-    Properties:
-      Name: !Sub "${ProjectPrefix}-sensor-stream-${DeploymentId}-${Environment}"
-      ShardCount: !Ref KinesisShardCount
-
-  # ---------------------------------------------------------------------------
-  #  Backend: Batch Processor Lambda
-  # ---------------------------------------------------------------------------
-  BatchProcessorFunction:
-    Type: AWS::Serverless::Function
-    Properties:
-      FunctionName: !Sub "${ProjectPrefix}-batch-processor-${DeploymentId}-${Environment}"
-      Handler: handlers.batch_handler.lambda_handler
-      CodeUri: ../src/
-      Layers: [!Ref SharedDependenciesLayer]
-      Environment:
-        Variables:
-          PLATFORM_CONFIG_TABLE: !Ref PlatformConfigTable
-          SENSOR_DATA_TABLE: !Ref SensorDataTable
-          ALERTS_TABLE: !Ref AlertsTable
-          DATA_BUCKET: !Ref DataLakeBucket
-          CRITICAL_ALERT_TOPIC_ARN: !Ref CriticalAlertTopic
-          STANDARD_ALERT_TOPIC_ARN: !Ref StandardAlertTopic
-          FEATURE_AUTO_PROVISION: "true"
-          LOG_LEVEL: INFO
-      Policies:
-        - DynamoDBCrudPolicy:
-            TableName: !Ref PlatformConfigTable
-        - DynamoDBCrudPolicy:
-            TableName: !Ref SensorDataTable
-        - DynamoDBCrudPolicy:
-            TableName: !Ref AlertsTable
-        - S3CrudPolicy:
-            BucketName: !Ref DataLakeBucket
-        - SNSPublishMessagePolicy:
-            TopicName: !GetAtt CriticalAlertTopic.TopicName
-        - SNSPublishMessagePolicy:
-            TopicName: !GetAtt StandardAlertTopic.TopicName
-        - KinesisStreamReadPolicy:
-            StreamName: !Ref SensorDataStream
-      Events:
-        KinesisEvent:
-          Type: Kinesis
-          Properties:
-            Stream: !GetAtt SensorDataStream.Arn
-            BatchSize: 500
-            StartingPosition: LATEST
-            MaximumBatchingWindowInSeconds: 30
-
-  # ---------------------------------------------------------------------------
-  #  Backend: Critical Alert Lambda
-  # ---------------------------------------------------------------------------
-  CriticalAlertFunction:
-    Type: AWS::Serverless::Function
-    Properties:
-      FunctionName: !Sub "${ProjectPrefix}-critical-alert-${DeploymentId}-${Environment}"
-      Handler: handlers.critical_handler.lambda_handler
-      CodeUri: ../src/
-      Layers: [!Ref SharedDependenciesLayer]
-      MemorySize: 128
-      Timeout: 10
-      Environment:
-        Variables:
-          ALERTS_TABLE: !Ref AlertsTable
-          CRITICAL_ALERT_TOPIC_ARN: !Ref CriticalAlertTopic
-          STANDARD_ALERT_TOPIC_ARN: !Ref StandardAlertTopic
-      Policies:
-        - DynamoDBCrudPolicy:
-            TableName: !Ref AlertsTable
-        - SNSPublishMessagePolicy:
-            TopicName: !GetAtt CriticalAlertTopic.TopicName
-        - SNSPublishMessagePolicy:
-            TopicName: !GetAtt StandardAlertTopic.TopicName
-
-  # ---------------------------------------------------------------------------
-  #  Backend: Scheduled Processor Lambda
-  # ---------------------------------------------------------------------------
-  ScheduledProcessorFunction:
-    Type: AWS::Serverless::Function
-    Properties:
-      FunctionName: !Sub "${ProjectPrefix}-scheduled-processor-${DeploymentId}-${Environment}"
-      Handler: handlers.scheduled_handler.lambda_handler
-      CodeUri: ../src/
-      Layers: [!Ref SharedDependenciesLayer]
-      MemorySize: 512
-      Timeout: 300
-      Environment:
-        Variables:
-          PLATFORM_CONFIG_TABLE: !Ref PlatformConfigTable
-          SENSOR_DATA_TABLE: !Ref SensorDataTable
-          ALERTS_TABLE: !Ref AlertsTable
-          DATA_BUCKET: !Ref DataLakeBucket
-          CRITICAL_ALERT_TOPIC_ARN: !Ref CriticalAlertTopic
-          STANDARD_ALERT_TOPIC_ARN: !Ref StandardAlertTopic
-      Policies:
-        - DynamoDBCrudPolicy:
-            TableName: !Ref PlatformConfigTable
-        - DynamoDBCrudPolicy:
-            TableName: !Ref SensorDataTable
-        - DynamoDBCrudPolicy:
-            TableName: !Ref AlertsTable
-        - S3CrudPolicy:
-            BucketName: !Ref DataLakeBucket
-        - SNSPublishMessagePolicy:
-            TopicName: !GetAtt CriticalAlertTopic.TopicName
-        - SNSPublishMessagePolicy:
-            TopicName: !GetAtt StandardAlertTopic.TopicName
-      Events:
-        AnalyticsSchedule:
-          Type: Schedule
-          Properties:
-            Schedule: rate(15 minutes)
-            Input: '{"mode":"analytics"}'
-        ForecastSchedule:
-          Type: Schedule
-          Properties:
-            Schedule: rate(1 hour)
-            Input: '{"mode":"forecast"}'
-        ComplianceSchedule:
-          Type: Schedule
-          Properties:
-            Schedule: cron(0 6 * * ? *)
-            Input: '{"mode":"compliance"}'
-        ShiftSchedule:
-          Type: Schedule
-          Properties:
-            Schedule: cron(0 6,14,22 * * ? *)
-            Input: '{"mode":"shift"}'
-
-  # ---------------------------------------------------------------------------
-  #  Synthetic Data Generator (dev/test only — Condition: IsSyntheticMode)
-  # ---------------------------------------------------------------------------
-  SyntheticGeneratorFunction:
-    Type: AWS::Serverless::Function
-    Condition: IsSyntheticMode
-    Properties:
-      FunctionName: !Sub "${ProjectPrefix}-synthetic-gen-${DeploymentId}-${Environment}"
-      Handler: handlers.synthetic_generator.lambda_handler
-      CodeUri: ../src/
-      Layers: [!Ref SharedDependenciesLayer]
-      MemorySize: 128
-      Timeout: 30
-      Environment:
-        Variables:
-          SENSOR_DATA_STREAM: !Ref SensorDataStream
-          SYNTHETIC_SENSOR_COUNT: !Ref SyntheticSensorCount
-          SYNTHETIC_CLIENT_ID: !Ref DeploymentId
-          DEPLOYMENT_ID: !Ref DeploymentId
-      Policies:
-        - KinesisCrudPolicy:
-            StreamName: !Ref SensorDataStream
-      Events:
-        GenerateSchedule:
-          Type: Schedule
-          Properties:
-            Schedule: rate(1 minute)
-            Input: '{"source":"synthetic_scheduler"}'
-
-  # ---------------------------------------------------------------------------
-  #  IoT Adapter (prod with real sensors — Condition: IsIoTRuleEnabled)
-  # ---------------------------------------------------------------------------
-  IoTAdapterFunction:
-    Type: AWS::Serverless::Function
-    Condition: IsIoTRuleEnabled
-    Properties:
-      FunctionName: !Sub "${ProjectPrefix}-iot-adapter-${DeploymentId}-${Environment}"
-      Handler: handlers.iot_adapter.lambda_handler
-      CodeUri: ../src/
-      Layers: [!Ref SharedDependenciesLayer]
-      MemorySize: 128
-      Timeout: 15
-      Environment:
-        Variables:
-          SENSOR_DATA_STREAM: !Ref SensorDataStream
-          DEPLOYMENT_ID: !Ref DeploymentId
-      Policies:
-        - KinesisCrudPolicy:
-            StreamName: !Ref SensorDataStream
-
-  TempMonitorIoTRule:
-    Type: AWS::IoT::TopicRule
-    Condition: IsIoTRuleEnabled
-    Properties:
-      RuleName: !Join ["_", !Split ["-", !Sub "${ProjectPrefix}BLEAdapter${DeploymentId}${Environment}"]]
-      TopicRulePayload:
-        Sql: !Sub "SELECT * FROM '${IoTTopicPattern}'"
-        Actions:
-          - Lambda:
-              FunctionArn: !GetAtt IoTAdapterFunction.Arn
-        RuleDisabled: false
-
-  IoTAdapterInvokePermission:
-    Type: AWS::Lambda::Permission
-    Condition: IsIoTRuleEnabled
-    Properties:
-      FunctionName: !Ref IoTAdapterFunction
-      Action: lambda:InvokeFunction
-      Principal: iot.amazonaws.com
-      SourceArn: !Sub
-        - "arn:${AWS::Partition}:iot:${AWS::Region}:${AWS::AccountId}:rule/${RuleName}"
-        - RuleName: !Join ["_", !Split ["-", !Sub "${ProjectPrefix}BLEAdapter${DeploymentId}${Environment}"]]
-
-  # ---------------------------------------------------------------------------
-  #  DynamoDB: PlatformConfig
-  # ---------------------------------------------------------------------------
-  PlatformConfigTable:
-    Type: AWS::DynamoDB::Table
-    Properties:
-      TableName: !Sub "${ProjectPrefix}-platform-config-${DeploymentId}-${Environment}"
-      BillingMode: PAY_PER_REQUEST
-      AttributeDefinitions:
-        - AttributeName: pk
-          AttributeType: S
-        - AttributeName: sk
-          AttributeType: S
-        - AttributeName: zone_id
-          AttributeType: S
-      KeySchema:
-        - AttributeName: pk
-          KeyType: HASH
-        - AttributeName: sk
-          KeyType: RANGE
-      GlobalSecondaryIndexes:
-        - IndexName: zone-index
-          KeySchema:
-            - AttributeName: zone_id
-              KeyType: HASH
-          Projection:
-            ProjectionType: ALL
-
-  # ---------------------------------------------------------------------------
-  #  DynamoDB: SensorData (+ client_id GSI)
-  # ---------------------------------------------------------------------------
-  SensorDataTable:
-    Type: AWS::DynamoDB::Table
-    Properties:
-      TableName: !Sub "${ProjectPrefix}-sensor-data-${DeploymentId}-${Environment}"
-      BillingMode: PAY_PER_REQUEST
-      AttributeDefinitions:
-        - AttributeName: pk
-          AttributeType: S
-        - AttributeName: sk
-          AttributeType: S
-        - AttributeName: client_id
-          AttributeType: S
-      KeySchema:
-        - AttributeName: pk
-          KeyType: HASH
-        - AttributeName: sk
-          KeyType: RANGE
-      GlobalSecondaryIndexes:
-        - IndexName: client-index
-          KeySchema:
-            - AttributeName: client_id
-              KeyType: HASH
-            - AttributeName: sk
-              KeyType: RANGE
-          Projection:
-            ProjectionType: ALL
-      TimeToLiveSpecification:
-        AttributeName: ttl
-        Enabled: true
-
-  # ---------------------------------------------------------------------------
-  #  DynamoDB: Alerts (+ client_id GSI)
-  # ---------------------------------------------------------------------------
+  # ── DynamoDB: Alert persistence ─────────────────────────────────────────
   AlertsTable:
     Type: AWS::DynamoDB::Table
     Properties:
-      TableName: !Sub "${ProjectPrefix}-alerts-${DeploymentId}-${Environment}"
+      TableName: !Sub "TempMonitor-Alerts-${DeploymentId}"
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
-        - AttributeName: pk
-          AttributeType: S
-        - AttributeName: sk
-          AttributeType: S
-        - AttributeName: client_id
-          AttributeType: S
+        - { AttributeName: PK, AttributeType: S }
+        - { AttributeName: SK, AttributeType: S }
+        - { AttributeName: client_id, AttributeType: S }
+        - { AttributeName: state_triggered, AttributeType: S }
       KeySchema:
-        - AttributeName: pk
-          KeyType: HASH
-        - AttributeName: sk
-          KeyType: RANGE
+        - { AttributeName: PK, KeyType: HASH }
+        - { AttributeName: SK, KeyType: RANGE }
       GlobalSecondaryIndexes:
-        - IndexName: client-index
+        - IndexName: ClientActiveAlerts
           KeySchema:
-            - AttributeName: client_id
-              KeyType: HASH
-            - AttributeName: sk
-              KeyType: RANGE
-          Projection:
-            ProjectionType: ALL
+            - { AttributeName: client_id, KeyType: HASH }
+            - { AttributeName: state_triggered, KeyType: RANGE }
+          Projection: { ProjectionType: ALL }
       TimeToLiveSpecification:
-        AttributeName: ttl
+        AttributeName: TTL
         Enabled: true
 
-  # ---------------------------------------------------------------------------
-  #  S3: Data Lake
-  # ---------------------------------------------------------------------------
-  DataLakeBucket:
-    Type: AWS::S3::Bucket
-    Properties:
-      BucketName: !Sub "${ProjectPrefix}-data-lake-${DeploymentId}-${Environment}"
-      LifecycleConfiguration:
-        Rules:
-          - Id: TransitionToStandardIA
-            Status: Enabled
-            Transitions:
-              - StorageClass: STANDARD_IA
-                TransitionInDays: 90
-          - Id: TransitionToGlacier
-            Status: Enabled
-            Transitions:
-              - StorageClass: GLACIER
-                TransitionInDays: 365
-
-  # ---------------------------------------------------------------------------
-  #  SNS Topics
-  # ---------------------------------------------------------------------------
-  CriticalAlertTopic:
-    Type: AWS::SNS::Topic
-    Properties:
-      TopicName: !Sub "${ProjectPrefix}-critical-alerts-${DeploymentId}-${Environment}"
-
-  StandardAlertTopic:
-    Type: AWS::SNS::Topic
-    Properties:
-      TopicName: !Sub "${ProjectPrefix}-standard-alerts-${DeploymentId}-${Environment}"
-
-  # ---------------------------------------------------------------------------
-  #  IoT Rules — Generic topic mode (when NOT using BLE adapter)
-  # ---------------------------------------------------------------------------
-  CriticalTempRule:
-    Type: AWS::IoT::TopicRule
-    Condition: IsGenericIoT
-    Properties:
-      RuleName: !Join ["_", !Split ["-", !Sub "${ProjectPrefix}CriticalTemp${DeploymentId}${Environment}"]]
-      TopicRulePayload:
-        Sql: "SELECT * FROM 'sensors/temp' WHERE temperature > 95 OR temperature < 50"
-        Actions:
-          - Lambda:
-              FunctionArn: !GetAtt CriticalAlertFunction.Arn
-        RuleDisabled: false
-
-  IoTKinesisRole:
-    Type: AWS::IAM::Role
-    Condition: IsGenericIoT
-    Properties:
-      RoleName: !Sub "${ProjectPrefix}-iot-kinesis-${DeploymentId}-${Environment}"
-      AssumeRolePolicyDocument:
-        Version: "2012-10-17"
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service: iot.amazonaws.com
-            Action: sts:AssumeRole
-      Policies:
-        - PolicyName: WriteToKinesis
-          PolicyDocument:
-            Version: "2012-10-17"
-            Statement:
-              - Effect: Allow
-                Action:
-                  - kinesis:PutRecord
-                  - kinesis:PutRecords
-                Resource: !GetAtt SensorDataStream.Arn
-
-  AllDataRule:
-    Type: AWS::IoT::TopicRule
-    Condition: IsGenericIoT
-    Properties:
-      RuleName: !Join ["_", !Split ["-", !Sub "${ProjectPrefix}AllData${DeploymentId}${Environment}"]]
-      TopicRulePayload:
-        Sql: "SELECT * FROM 'sensors/temp'"
-        Actions:
-          - Kinesis:
-              StreamName: !Ref SensorDataStream
-              PartitionKey: "${device_id}"
-              RoleArn: !GetAtt IoTKinesisRole.Arn
-        RuleDisabled: false
-
-  IoTInvokeCriticalAlertPermission:
-    Type: AWS::Lambda::Permission
-    Condition: IsGenericIoT
-    Properties:
-      FunctionName: !Ref CriticalAlertFunction
-      Action: lambda:InvokeFunction
-      Principal: iot.amazonaws.com
-      SourceArn: !Sub
-        - "arn:${AWS::Partition}:iot:${AWS::Region}:${AWS::AccountId}:rule/${RuleName}"
-        - RuleName: !Join ["_", !Split ["-", !Sub "${ProjectPrefix}CriticalTemp${DeploymentId}${Environment}"]]
-
-  # ---------------------------------------------------------------------------
-  #  Dashboard: API Gateway HTTP API
-  # ---------------------------------------------------------------------------
+  # ── API Gateway ─────────────────────────────────────────────────────────
   DashboardApi:
     Type: AWS::Serverless::HttpApi
     Properties:
@@ -487,9 +105,7 @@ Resources:
         AllowMethods: ["GET", "POST"]
         AllowHeaders: ["*"]
 
-  # ---------------------------------------------------------------------------
-  #  Dashboard: Lambda Function (WSGI)
-  # ---------------------------------------------------------------------------
+  # ── Dashboard Lambda ────────────────────────────────────────────────────
   DashboardFunction:
     Type: AWS::Serverless::Function
     Properties:
@@ -498,37 +114,47 @@ Resources:
       CodeUri: ../dashboard/
       MemorySize: 512
       Timeout: 30
-      Layers: []
       Environment:
         Variables:
           AWS_MODE: "true"
-          SENSOR_DATA_TABLE: !Ref SensorDataTable
+          DATA_SOURCE: !Ref DataSource
+          MYSQL_HOST: !Ref MysqlHost
+          MYSQL_PORT: !Ref MysqlPort
+          MYSQL_USER: !Ref MysqlUser
+          MYSQL_PASSWORD: !Ref MysqlPassword
+          MYSQL_DATABASE: !Ref MysqlDatabase
+          PARQUET_BUCKET: !Ref ParquetBucket
+          PARQUET_PREFIX: !Ref ParquetPrefix
           ALERTS_TABLE: !Ref AlertsTable
-          PLATFORM_CONFIG_TABLE: !Ref PlatformConfigTable
-          DATA_BUCKET: !Ref DataLakeBucket
+          NOTE_LAMBDA_ARN: !Ref NoteLambdaArn
           COOKIE_SECRET: !If
             - GenerateCookieSecret
             - !Sub "auto-${DeploymentId}-${AWS::StackName}"
             - !Ref CookieSecret
       Policies:
-        - DynamoDBReadPolicy:
-            TableName: !Ref SensorDataTable
-        - DynamoDBReadPolicy:
-            TableName: !Ref AlertsTable
-        - DynamoDBReadPolicy:
-            TableName: !Ref PlatformConfigTable
-        - S3ReadPolicy:
-            BucketName: !Ref DataLakeBucket
         - Version: "2012-10-17"
           Statement:
             - Effect: Allow
-              Action:
-                - secretsmanager:ListSecrets
+              Action: [secretsmanager:ListSecrets]
               Resource: "*"
             - Effect: Allow
-              Action:
-                - secretsmanager:GetSecretValue
+              Action: [secretsmanager:GetSecretValue]
               Resource: !Sub "arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:TempMonitor/${DeploymentId}/*"
+        - DynamoDBCrudPolicy:
+            TableName: !Ref AlertsTable
+        - !If
+          - HasParquetBucket
+          - S3ReadPolicy:
+              BucketName: !Ref ParquetBucket
+          - !Ref AWS::NoValue
+        - !If
+          - HasNoteLambda
+          - Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [lambda:InvokeFunction]
+                Resource: !Ref NoteLambdaArn
+          - !Ref AWS::NoValue
       Events:
         CatchAll:
           Type: HttpApi
@@ -543,14 +169,12 @@ Resources:
             Path: /
             Method: ANY
 
-  # ---------------------------------------------------------------------------
-  #  Dashboard: CloudWatch Alarm
-  # ---------------------------------------------------------------------------
+  # ── CloudWatch Alarm ────────────────────────────────────────────────────
   DashboardErrorAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmName: !Sub "TempMonitor-Dashboard-Errors-${DeploymentId}-${Environment}"
-      AlarmDescription: "Fires when Dashboard Lambda has 5+ errors in 5 minutes."
+      AlarmDescription: "Dashboard Lambda 5+ errors in 5 minutes."
       Namespace: AWS/Lambda
       MetricName: Errors
       Dimensions:
@@ -563,28 +187,10 @@ Resources:
       ComparisonOperator: GreaterThanOrEqualToThreshold
       TreatMissingData: notBreaching
 
-# =============================================================================
-#  OUTPUTS
-# =============================================================================
 Outputs:
   DashboardUrl:
     Description: "Dashboard URL (API Gateway)"
     Value: !Sub "https://${DashboardApi}.execute-api.${AWS::Region}.amazonaws.com"
-  BatchProcessorArn:
-    Description: ARN of the Batch Processor Lambda
-    Value: !GetAtt BatchProcessorFunction.Arn
-  ScheduledProcessorArn:
-    Description: ARN of the Scheduled Processor Lambda
-    Value: !GetAtt ScheduledProcessorFunction.Arn
-  SensorDataStreamName:
-    Description: Name of the Kinesis data stream
-    Value: !Ref SensorDataStream
-  DataLakeBucketName:
-    Description: Name of the S3 data lake bucket
-    Value: !Ref DataLakeBucket
-  SensorDataTableName:
-    Description: SensorData DynamoDB table name
-    Value: !Ref SensorDataTable
   AlertsTableName:
-    Description: Alerts DynamoDB table name
+    Description: "DynamoDB alerts table name"
     Value: !Ref AlertsTable
