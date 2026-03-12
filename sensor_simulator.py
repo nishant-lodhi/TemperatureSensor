@@ -60,7 +60,7 @@ OFFLINE_SENSORS = [
 
 TEMP_HIGH, TEMP_LOW = 85.0, 65.0
 TEMP_CRIT_HIGH, TEMP_CRIT_LOW = 95.0, 50.0
-HISTORY_DAYS = 10
+HISTORY_DAYS = 300
 OFFLINE_HOURS = 2
 
 # ── Temperature generator ────────────────────────────────────────────────────

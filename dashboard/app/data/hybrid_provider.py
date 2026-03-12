@@ -37,12 +37,14 @@ class HybridProvider:
         table = os.environ.get("ALERTS_TABLE", "") or f"TempMonitor-Alerts-local-{client_id}"
         self._alerts = AlertManager(client_id, table, self._thresholds)
 
-        self._cache: dict = {"states": None, "ts": 0, "ttl": 20}
+        self._cache: dict = {"states": None, "ts": 0, "ttl": 15}
         self._readings_cache: dict = {}
         self._loc_cache: dict = {}
         self._loc_ts: float = 0
         self._locations_cache: list[str] = []
         self._locations_ts: float = 0
+        self._compliance_cache: dict = {"data": None, "ts": 0, "ttl": 60}
+        self._alerts_cache: dict = {"data": None, "ts": 0, "ttl": 10}
 
     # ── helpers ──────────────────────────────────────────────────────────────
 
@@ -208,6 +210,11 @@ class HybridProvider:
     # ── compliance (Parquet for past days, MySQL for today) ─────────────────
 
     def get_compliance_history(self, days: int) -> list[dict]:
+        now_ts = time.time()
+        cc = self._compliance_cache
+        if cc["data"] is not None and (now_ts - cc["ts"]) < cc["ttl"]:
+            return cc["data"]
+
         from app import config as cfg
         now = datetime.now(timezone.utc)
         start = now - timedelta(days=days)
@@ -234,6 +241,7 @@ class HybridProvider:
                     "compliance_pct": round(comp / total * 100, 1) if total else 0.0,
                 })
 
+        cc.update(data=history, ts=now_ts)
         return history
 
     # ── devices ─────────────────────────────────────────────────────────────
@@ -249,14 +257,23 @@ class HybridProvider:
     # ── alerts (delegate to AlertManager) ───────────────────────────────────
 
     def get_live_alerts(self) -> list[dict]:
+        now = time.time()
+        ac = self._alerts_cache
+        if ac["data"] is not None and (now - ac["ts"]) < ac["ttl"]:
+            return ac["data"]
         states = self.get_all_sensor_states()
-        return self._alerts.evaluate(states)
+        result = self._alerts.evaluate(states)
+        ac.update(data=result, ts=now)
+        return result
 
     def get_alert_history(self, device_id: Optional[str] = None, days: int = 7) -> list[dict]:
         return self._alerts.get_history(device_id, days)
 
     def dismiss_alert(self, device_id: str, alert_type: str) -> None:
         self._alerts.dismiss(device_id, alert_type)
+        self._alerts_cache["data"] = None
 
     def send_alert_note(self, device_id: str, alert_type: str, context: dict) -> bool:
-        return self._alerts.send_note_and_dismiss(device_id, alert_type, context)
+        result = self._alerts.send_note_and_dismiss(device_id, alert_type, context)
+        self._alerts_cache["data"] = None
+        return result

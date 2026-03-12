@@ -313,6 +313,7 @@ html, body {
     border-bottom: 1px solid var(--border) !important;
 }
 
+
 /* ── Bootstrap overrides for light theme ────────────────── */
 .container-fluid { max-width: 100%; }
 

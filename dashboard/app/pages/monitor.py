@@ -1,8 +1,10 @@
 """Single-page dashboard — unified Live + History view.
 
-Layout: Banner → Filters → StatusBar → Alerts → Grid → KPIs → Range → Chart
-        → Compliance → AlertTable
-Clientside callbacks handle clicks instantly; server callbacks fetch/render.
+Performance-optimized callback architecture:
+  - state_pump (tick only)     → states, alerts, compliance   [slow path, every 10s]
+  - readings_pump (selection)  → readings for 1 sensor        [fast path, on click/range]
+  - Clientside callbacks       → filter/range/select           [instant, no server]
+  - Display callbacks          → pure render from stores       [fast, no DB]
 """
 
 from datetime import datetime, timedelta, timezone
@@ -206,9 +208,24 @@ dash.clientside_callback(
     prevent_initial_call=True,
 )
 
+# Sensor card click — fully clientside, no server round-trip
+dash.clientside_callback(
+    """function() {
+        var ctx = dash_clientside.callback_context;
+        if (!ctx.triggered.length) return dash_clientside.no_update;
+        var t = ctx.triggered[0];
+        if (!t.value) return dash_clientside.no_update;
+        try { return JSON.parse(t.prop_id.split('.')[0]).index; }
+        catch(e) { return dash_clientside.no_update; }
+    }""",
+    Output("mon-selected", "data"),
+    Input({"type": "sensor-card", "index": dash.ALL}, "n_clicks"),
+    prevent_initial_call=True,
+)
+
 
 # ═══════════════════════════════════════════════════════════════════════
-# DATA CALLBACKS
+# DATA CALLBACKS — split into two independent paths
 # ═══════════════════════════════════════════════════════════════════════
 
 @callback(
@@ -240,22 +257,18 @@ def update_mac_options(location, states):
     return [{"label": s["device_id"], "value": s["device_id"]} for s in filt]
 
 
+# ── SLOW PATH: tick-only — states, alerts, compliance ────
 @callback(
     Output("store-states", "data"),
     Output("store-alerts", "data"),
     Output("store-compliance", "data"),
-    Output("store-readings", "data"),
     Output("mon-selected", "data", allow_duplicate=True),
     Input("mon-tick", "n_intervals"),
-    Input("mon-selected", "data"),
-    Input("range-mode", "data"),
-    Input("store-date-range", "data"),
-    State("store-states", "data"),
+    State("mon-selected", "data"),
     State("filter-location", "value"),
     prevent_initial_call="initial_duplicate",
 )
-def data_pump(_, selected_id, range_mode, date_range,
-              prev_states, location_filter):
+def state_pump(_, selected_id, location_filter):
     prov = get_provider(get_client_id())
     states = prov.get_all_sensor_states()
     alerts = prov.get_live_alerts()
@@ -271,11 +284,26 @@ def data_pump(_, selected_id, range_mode, date_range,
         if not selected_id or selected_id not in vids:
             selected_id, auto = visible[0]["device_id"], True
 
-    rd = (
-        _fetch_readings(prov, selected_id, range_mode, states, date_range)
-        if selected_id else None
-    )
-    return states, alerts, compliance, rd, (selected_id if auto else no_update)
+    return states, alerts, compliance, (selected_id if auto else no_update)
+
+
+# ── FAST PATH: selection/range changes — readings only ───
+@callback(
+    Output("store-readings", "data"),
+    Input("mon-selected", "data"),
+    Input("range-mode", "data"),
+    Input("store-date-range", "data"),
+    Input("mon-tick", "n_intervals"),
+    State("store-states", "data"),
+    prevent_initial_call="initial_duplicate",
+)
+def readings_pump(selected_id, range_mode, date_range, _, states):
+    if not selected_id:
+        return None
+    if ctx.triggered_id == "mon-tick" and range_mode != "live":
+        return no_update
+    prov = get_provider(get_client_id())
+    return _fetch_readings(prov, selected_id, range_mode, states, date_range)
 
 
 def _fetch_readings(prov, device_id, range_mode, states, date_range=None):
@@ -350,7 +378,7 @@ def _build_forecast_alerts(fc_series, device_id):
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# DISPLAY CALLBACKS
+# DISPLAY CALLBACKS — pure rendering, no DB calls
 # ═══════════════════════════════════════════════════════════════════════
 
 @callback(
@@ -380,7 +408,6 @@ def render_banner(states, alerts, location_filter, readings_data):
     n_a = len(vis_a)
     fc_n = (readings_data.get("forecast_alert_count", 0)
             if readings_data else 0)
-
     title = location_filter or "All Facilities"
 
     if avg >= cfg.TEMP_CRITICAL_HIGH or n_a >= 5:
@@ -716,18 +743,6 @@ def render_grid(states, alerts, selected_id, status_filter, location_filter):
     return html.Div(grid, style={"marginBottom": "10px"})
 
 
-@callback(
-    Output("mon-selected", "data"),
-    Input({"type": "sensor-card", "index": dash.ALL}, "n_clicks"),
-    prevent_initial_call=True,
-)
-def select_sensor(clicks):
-    if not ctx.triggered or not ctx.triggered[0].get("value"):
-        return no_update
-    tid = ctx.triggered_id
-    return tid["index"] if tid and isinstance(tid, dict) else no_update
-
-
 # ── KPIs ─────────────────────────────────────────────────
 
 @callback(
@@ -917,16 +932,17 @@ def render_compliance(states, comp, location_filter):
     if not states:
         return html.Div()
 
-    temps = [s["temperature"] for s in states]
-    if not temps:
-        return html.Div()
-    all_off = all(s.get("status") == "offline" for s in states)
-    in_r = sum(1 for t in temps if cfg.TEMP_LOW <= t <= cfg.TEMP_HIGH)
-    total = len(temps)
-    pct = round(in_r / total * 100, 1)
-    out = total - in_r
-    hot = sum(1 for t in temps if t > cfg.TEMP_HIGH)
-    cold = sum(1 for t in temps if t < cfg.TEMP_LOW)
+    total = len(states)
+    online = [s for s in states if s.get("status") != "offline"]
+    offline_n = total - len(online)
+    all_off = not online
+
+    online_temps = [s["temperature"] for s in online]
+    in_r = sum(1 for t in online_temps if cfg.TEMP_LOW <= t <= cfg.TEMP_HIGH)
+    hot = sum(1 for t in online_temps if t > cfg.TEMP_HIGH)
+    cold = sum(1 for t in online_temps if t < cfg.TEMP_LOW)
+    issue = hot + cold
+    pct = round(in_r / len(online) * 100, 1) if online else 0.0
 
     scope = location_filter if location_filter else "All Facilities"
     gl = (
@@ -937,14 +953,16 @@ def render_compliance(states, comp, location_filter):
     stats = html.Div([
         _stat("Total", str(total), _TS),
         _stat("In Range", str(in_r), cfg.COLORS["success"]),
-        _stat("Out", str(out),
-              cfg.COLORS["warning"] if out else cfg.COLORS["success"]),
+        _stat("Issue", str(issue),
+              cfg.COLORS["warning"] if issue else cfg.COLORS["success"]),
         _stat("Too Hot", str(hot),
               cfg.COLORS["danger"] if hot else cfg.COLORS["success"]),
         _stat("Too Cold", str(cold),
               _PR if cold else cfg.COLORS["success"]),
+        _stat("Offline", str(offline_n),
+              "#94a3b8" if offline_n else cfg.COLORS["success"]),
     ], style={
-        "display": "flex", "gap": "12px", "flexWrap": "wrap",
+        "display": "flex", "gap": "10px", "flexWrap": "wrap",
         "justifyContent": "center", "padding": "4px 0",
     })
 
