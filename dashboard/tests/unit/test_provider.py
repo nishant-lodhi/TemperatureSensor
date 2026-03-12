@@ -31,6 +31,7 @@ class TestGetProvider:
         for m in ("get_all_sensor_states", "get_readings", "get_live_alerts",
                    "get_alert_history", "get_forecast", "get_forecast_series",
                    "get_compliance_history", "get_all_devices", "get_zones",
+                   "get_locations", "get_sensors_for_location",
                    "dismiss_alert", "send_alert_note"):
             assert callable(getattr(p, m, None)), f"Missing: {m}"
 
@@ -49,7 +50,7 @@ class TestMockProviderBasics:
         required = {"device_id", "temperature", "status", "battery_pct",
                      "signal_dbm", "signal_label", "anomaly", "client_id",
                      "actual_high_1h", "actual_low_1h", "rolling_avg_1h",
-                     "rate_of_change", "last_seen", "facility_id"}
+                     "rate_of_change", "last_seen", "facility_id", "location"}
         for s in MockProvider("c1").get_all_sensor_states():
             assert not (required - set(s.keys())), f"Missing keys in {s['device_id']}"
 

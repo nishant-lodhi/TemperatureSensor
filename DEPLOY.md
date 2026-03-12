@@ -32,7 +32,7 @@
 | `NOTE_LAMBDA_ARN` | — | Lambda ARN for officer note dispatch |
 | `COOKIE_SECRET` | auto-generated | HMAC key for session cookies (set in prod) |
 | `AWS_REGION` | `us-east-1` | AWS region for DynamoDB and other services |
-| `CLIENT_ID` | `default` | Tenant identifier for multi-tenant deployments |
+| `CLIENT_ID` | `default` | Tenant identifier — maps to `customer_key` in MySQL |
 
 ## Local Development
 
@@ -70,7 +70,7 @@ Flask's single-threaded dev server and provides sub-second UI response times.
 ### Step 4: Run tests and linting
 
 ```bash
-make test                 # 139 unit tests
+make test                 # 155 unit tests
 make lint                 # ruff check (expects 0 errors)
 ```
 
@@ -257,9 +257,12 @@ sam deploy --config-env prod-a --config-file infra/samconfig.toml \
 | Issue | Cause | Fix |
 |---|---|---|
 | Dashboard slow (3-5s clicks) | Single-threaded Flask server | Use `make run` (gunicorn) instead of `make run-debug` |
-| Blank chart on 60-120 day range | Too many data points | Downsampling is automatic (2000 pts); check MySQL query limits |
+| Blank chart on long date range | Too many data points | Downsampling is automatic (2000 pts); check MySQL query limits |
+| Location dropdown empty | `name` column null/empty in DB | Ensure `name` is populated in `dg_gateway_data` for sensors |
+| No sensors after login | `customer_key` mismatch | Verify `CLIENT_ID` matches actual `customer_key` values in DB |
 | Alerts not showing for auto-selected sensor | `mon-selected` store not populated | Fixed in data pump — auto-selects first sensor on load |
 | Compliance shows 0% | All sensors offline | Expected — shows "Last Known Compliance" label |
 | `moto` errors on startup | Wrong moto version | Ensure `moto>=5.0` in requirements |
 | MySQL connection timeouts | Aurora idle connection pruning | Auto-retry with fresh connection is built in |
 | Parquet not found (hybrid mode) | S3 bucket/prefix misconfigured | Falls back to MySQL automatically; check `PARQUET_BUCKET` and `PARQUET_PREFIX` |
+| Date picker not visible | CSS not loaded | Ensure `app/assets/style.css` exists — Dash auto-serves from `assets/` |

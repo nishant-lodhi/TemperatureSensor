@@ -10,14 +10,15 @@ import plotly.graph_objects as go
 
 from app import config as cfg
 
-_F = "'DM Sans', system-ui, sans-serif"
+_F = "'Inter', 'DM Sans', system-ui, sans-serif"
 
 _SEVERITY_MARKER = {
     "CRITICAL": {"color": cfg.COLORS["critical"], "symbol": "diamond", "size": 12},
     "HIGH": {"color": cfg.COLORS["danger"], "symbol": "diamond", "size": 10},
     "MEDIUM": {"color": cfg.COLORS["warning"], "symbol": "circle", "size": 9},
-    "WARNING": {"color": "#FFB74D", "symbol": "circle", "size": 8},
+    "WARNING": {"color": "#fbbf24", "symbol": "circle", "size": 8},
     "LOW": {"color": cfg.COLORS["primary_light"], "symbol": "circle", "size": 7},
+    "FORECAST": {"color": cfg.COLORS["accent"], "symbol": "diamond-open", "size": 10},
 }
 
 
@@ -58,7 +59,7 @@ def unified_chart(
     is_offline: bool = False,
     height: int = 380,
 ) -> go.Figure:
-    """Single chart: actual line + forecast + safe zone + thresholds + alert markers."""
+    """Single chart: actual line + forecast torch + safe zone + alert markers."""
     if len(readings) > 2000:
         readings = _downsample(readings)
 
@@ -94,18 +95,31 @@ def unified_chart(
             f_pred = [h_t[-1]] + f_pred
             f_up = [h_t[-1]] + f_up
             f_lo = [h_t[-1]] + f_lo
+
         fig.add_trace(go.Scatter(
             x=f_ts, y=f_up, mode="lines", line=dict(width=0),
             showlegend=False, hoverinfo="skip",
         ))
         fig.add_trace(go.Scatter(
             x=f_ts, y=f_lo, fill="tonexty",
-            fillcolor=cfg.COLORS["primary_dim"], line=dict(width=0),
+            fillcolor="rgba(249,115,22,0.08)", line=dict(width=0),
             name="Forecast Range",
+        ))
+
+        # Torch glow — wide translucent line behind forecast
+        fig.add_trace(go.Scatter(
+            x=f_ts, y=f_pred, mode="lines",
+            line=dict(color="rgba(249,115,22,0.12)", width=14),
+            showlegend=False, hoverinfo="skip",
+        ))
+        fig.add_trace(go.Scatter(
+            x=f_ts, y=f_pred, mode="lines",
+            line=dict(color="rgba(249,115,22,0.25)", width=6),
+            showlegend=False, hoverinfo="skip",
         ))
         fig.add_trace(go.Scatter(
             x=f_ts, y=f_pred, mode="lines", name="Forecast",
-            line=dict(color=cfg.COLORS["primary_light"], width=2, dash="dot"),
+            line=dict(color=cfg.COLORS["accent"], width=2.5, dash="dot"),
         ))
 
     if h_t:
@@ -129,15 +143,14 @@ def unified_chart(
 
 
 def _add_threshold_lines(fig: go.Figure, hi: float, lo: float):
-    """Add high/low horizontal reference lines with staggered annotations."""
     fig.add_hline(
-        y=hi, line_dash="dash", line_color="rgba(229,57,53,0.35)", line_width=1,
+        y=hi, line_dash="dash", line_color="rgba(239,68,68,0.3)", line_width=1,
         annotation_text=f"High: {hi:.1f}°F",
         annotation_font_color=cfg.COLORS["danger"], annotation_font_size=9,
         annotation_position="top right",
     )
     fig.add_hline(
-        y=lo, line_dash="dash", line_color="rgba(255,143,63,0.35)", line_width=1,
+        y=lo, line_dash="dash", line_color="rgba(6,182,212,0.3)", line_width=1,
         annotation_text=f"Low: {lo:.1f}°F",
         annotation_font_color=cfg.COLORS["primary_light"], annotation_font_size=9,
         annotation_position="bottom right",
@@ -145,7 +158,6 @@ def _add_threshold_lines(fig: go.Figure, hi: float, lo: float):
 
 
 def _add_safe_thresholds(fig: go.Figure):
-    """Add 'Too Hot' and 'Too Cold' threshold lines."""
     fig.add_hline(
         y=cfg.TEMP_HIGH, line_dash="dot", line_color=cfg.COLORS["danger"], line_width=1,
         annotation_text="Too Hot",
@@ -161,7 +173,6 @@ def _add_safe_thresholds(fig: go.Figure):
 
 
 def _add_alert_markers(fig: go.Figure, alerts: list[dict], h_ts: list, h_t: list):
-    """Place severity-colored diamond markers at alert timestamps on the chart."""
     a_ts, a_temp, a_text, a_color, a_symbol, a_size = [], [], [], [], [], []
     for a in alerts:
         ts = a.get("triggered_at", "")
@@ -196,14 +207,13 @@ def _add_alert_markers(fig: go.Figure, alerts: list[dict], h_ts: list, h_t: list
         fig.add_trace(go.Scatter(
             x=a_ts, y=a_temp, mode="markers",
             marker=dict(color=a_color, symbol=a_symbol, size=a_size,
-                        line=dict(width=1, color="rgba(255,255,255,0.4)")),
+                        line=dict(width=1.5, color="rgba(255,255,255,0.3)")),
             name="Alerts", hovertext=a_text, hoverinfo="text",
             customdata=[{"device_id": a.get("device_id"), "alert_type": a.get("alert_type")} for a in alerts if a.get("triggered_at")],
         ))
 
 
 def _find_closest_ts(h_ts: list[str], target_ts: str):
-    """Binary-ish search for nearest timestamp in a sorted list."""
     if not h_ts:
         return None
     best_idx = 0
@@ -254,7 +264,7 @@ def compliance_gauge(pct: float, label: str = "Live Compliance") -> go.Figure:
         gauge={
             "axis": {"range": [0, 100], "tickwidth": 0, "tickcolor": "rgba(0,0,0,0)"},
             "bar": {"color": cfg.COLORS["success"] if pct >= cfg.COMPLIANCE_TARGET else cfg.COLORS["warning"], "thickness": 0.6},
-            "bgcolor": cfg.COLORS["card_border"],
+            "bgcolor": "rgba(51,65,85,0.3)",
             "steps": [{"range": [0, cfg.COMPLIANCE_TARGET], "color": cfg.COLORS["danger_dim"]},
                        {"range": [cfg.COMPLIANCE_TARGET, 100], "color": cfg.COLORS["success_dim"]}],
             "threshold": {"line": {"color": cfg.COLORS["primary"], "width": 2}, "thickness": 0.8, "value": cfg.COMPLIANCE_TARGET},

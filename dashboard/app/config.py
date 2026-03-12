@@ -41,39 +41,46 @@ ALERT_OFFLINE_THRESHOLD_SEC = 300
 ALERT_DEGRADED_THRESHOLD_SEC = 120
 
 COLORS = {
-    "bg": "#0D0D0D", "bg_subtle": "#111111",
-    "card": "#181818", "card_hover": "#1F1F1F", "card_border": "#262626",
-    "text": "#F0EBE3", "text_muted": "#807A72",
-    "primary": "#FF6B00", "primary_light": "#FF8F3F",
-    "primary_dim": "rgba(255,107,0,0.10)", "primary_glow": "rgba(255,107,0,0.22)",
-    "success": "#43A047", "success_dim": "rgba(67,160,71,0.10)",
-    "warning": "#FB8C00", "warning_dim": "rgba(251,140,0,0.10)",
-    "danger": "#E53935", "danger_dim": "rgba(229,57,53,0.10)",
-    "critical": "#C62828", "safe_zone": "rgba(255,107,0,0.05)",
-    "selected": "rgba(255,107,0,0.18)",
+    "bg": "#0f172a", "bg_subtle": "#131c2e",
+    "card": "rgba(30,41,59,0.70)", "card_solid": "#1e293b",
+    "card_hover": "#263548", "card_border": "rgba(51,65,85,0.5)",
+    "text": "#e2e8f0", "text_muted": "#94a3b8",
+    "primary": "#06b6d4", "primary_light": "#22d3ee",
+    "primary_dim": "rgba(6,182,212,0.12)", "primary_glow": "rgba(6,182,212,0.25)",
+    "accent": "#f97316", "accent_dim": "rgba(249,115,22,0.12)",
+    "success": "#22c55e", "success_dim": "rgba(34,197,94,0.10)",
+    "warning": "#f59e0b", "warning_dim": "rgba(245,158,11,0.10)",
+    "danger": "#ef4444", "danger_dim": "rgba(239,68,68,0.10)",
+    "critical": "#dc2626", "safe_zone": "rgba(6,182,212,0.05)",
+    "selected": "rgba(6,182,212,0.18)",
 }
 
 CARD_STYLE = {
     "backgroundColor": COLORS["card"],
     "border": f"1px solid {COLORS['card_border']}",
-    "borderRadius": "14px",
-    "boxShadow": "0 4px 20px rgba(0,0,0,0.45), inset 0 1px 0 rgba(255,255,255,0.03)",
+    "borderRadius": "12px",
+    "backdropFilter": "blur(12px)",
+    "WebkitBackdropFilter": "blur(12px)",
+    "boxShadow": "0 4px 24px rgba(0,0,0,0.25)",
 }
 
-SEVERITY_LABELS = {"CRITICAL": "Urgent", "HIGH": "Important", "MEDIUM": "Moderate", "WARNING": "Notice", "LOW": "Info"}
-SEVERITY_COLORS = {"CRITICAL": COLORS["critical"], "HIGH": COLORS["danger"], "MEDIUM": COLORS["warning"], "WARNING": "#FFB74D", "LOW": COLORS["primary_light"]}
+SEVERITY_LABELS = {"CRITICAL": "Urgent", "HIGH": "Important", "MEDIUM": "Moderate",
+                   "WARNING": "Notice", "LOW": "Info", "FORECAST": "Forecast"}
+SEVERITY_COLORS = {"CRITICAL": COLORS["critical"], "HIGH": COLORS["danger"],
+                   "MEDIUM": COLORS["warning"], "WARNING": "#fbbf24",
+                   "LOW": COLORS["primary_light"], "FORECAST": COLORS["accent"]}
 
 CHART_TEMPLATE = "plotly_dark"
 CHART_PAPER_BG = "rgba(0,0,0,0)"
 CHART_PLOT_BG = "rgba(0,0,0,0)"
-CHART_GRID_COLOR = "rgba(255,255,255,0.04)"
-CHART_FONT = dict(family="'DM Sans', system-ui, sans-serif", color=COLORS["text"])
-HOVER_LABEL = dict(bgcolor="rgba(24,24,24,0.92)", bordercolor=COLORS["card_border"],
-                   font=dict(family="'DM Sans', system-ui, sans-serif", size=13, color=COLORS["text"]))
+CHART_GRID_COLOR = "rgba(148,163,184,0.06)"
+CHART_FONT = dict(family="'Inter', 'DM Sans', system-ui, sans-serif", color=COLORS["text"])
+HOVER_LABEL = dict(bgcolor="rgba(15,23,42,0.92)", bordercolor=COLORS["card_border"],
+                   font=dict(family="'Inter', system-ui, sans-serif", size=13, color=COLORS["text"]))
 
 
-def _wifi_svg(arcs=3, color="#43A047"):
-    dim = "rgba(255,255,255,0.12)"
+def _wifi_svg(arcs=3, color="#22c55e"):
+    dim = "rgba(255,255,255,0.08)"
     c = [dim, dim, dim]
     for i in range(arcs):
         c[i] = color

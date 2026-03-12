@@ -22,17 +22,20 @@ class MockProvider:
              "actual_low_1h": 72.1, "rolling_avg_1h": 73.8, "rate_of_change": 0.3,
              "status": "online", "last_seen": now.isoformat(), "battery_pct": 92,
              "signal_dbm": -42, "signal_label": "Strong", "anomaly": False, "anomaly_reason": None,
-             "zone_id": "zone-A", "zone_label": "Cell Block A", "facility_id": "fac-1", "client_id": self._client_id},
+             "location": "Block A", "zone_id": "zone-A", "zone_label": "Cell Block A",
+             "facility_id": "fac-1", "client_id": self._client_id},
             {"device_id": self._sensors[1], "temperature": 88.0, "actual_high_1h": 89.5,
              "actual_low_1h": 85.0, "rolling_avg_1h": 87.0, "rate_of_change": 1.5,
              "status": "online", "last_seen": now.isoformat(), "battery_pct": 15,
              "signal_dbm": -70, "signal_label": "Weak", "anomaly": True, "anomaly_reason": "Temperature above high limit",
-             "zone_id": "zone-B", "zone_label": "Cell Block B", "facility_id": "fac-1", "client_id": self._client_id},
+             "location": "Block B", "zone_id": "zone-B", "zone_label": "Cell Block B",
+             "facility_id": "fac-1", "client_id": self._client_id},
             {"device_id": self._sensors[2], "temperature": 70.1, "actual_high_1h": 71.0,
              "actual_low_1h": 69.0, "rolling_avg_1h": 70.0, "rate_of_change": 0.0,
              "status": "offline", "last_seen": (now - timedelta(hours=2)).isoformat(), "battery_pct": 0,
              "signal_dbm": -99, "signal_label": "No Signal", "anomaly": False, "anomaly_reason": None,
-             "zone_id": "zone-A", "zone_label": "Cell Block A", "facility_id": "fac-1", "client_id": self._client_id},
+             "location": "Block A", "zone_id": "zone-A", "zone_label": "Cell Block A",
+             "facility_id": "fac-1", "client_id": self._client_id},
         ]
 
     def get_readings(self, device_id: str, since_iso: str, until_iso: str | None = None) -> list[dict]:
@@ -57,6 +60,16 @@ class MockProvider:
                 for i in range(days)]
 
     def get_all_devices(self) -> list[str]:
+        return self._sensors[:]
+
+    def get_locations(self) -> list[str]:
+        return ["Block A", "Block B"]
+
+    def get_sensors_for_location(self, location: str | None = None) -> list[str]:
+        loc_map = {"Block A": [self._sensors[0], self._sensors[2]],
+                   "Block B": [self._sensors[1]]}
+        if location:
+            return loc_map.get(location, [])
         return self._sensors[:]
 
     def get_zones(self) -> list[str]:

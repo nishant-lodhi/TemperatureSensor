@@ -77,20 +77,62 @@ def warmup():
     logger.info("MySQL connection warmed up")
 
 
-# ── Sensor queries ──────────────────────────────────────────────────────────
+# ── Customer / Location queries ──────────────────────────────────────────────
 
-def fetch_latest_per_sensor() -> list[dict]:
-    """Latest reading per Temp-Sensor MAC (de-duplicated)."""
-    rows = query("""
-        SELECT g.mac, g.body_temperature, g.rssi, g.power,
-               g.date_added, g.tags_id, g.gateway_mac
-        FROM dg_gateway_data g
-        INNER JOIN (
-            SELECT mac, MAX(date_added) AS max_da
-            FROM dg_gateway_data WHERE mac_type='Temp-Sensor' GROUP BY mac
-        ) latest ON g.mac = latest.mac AND g.date_added = latest.max_da
-        WHERE g.mac_type='Temp-Sensor'
-    """)
+def _ck_clause(customer_key: str | None) -> tuple[str, tuple]:
+    """Build optional AND customer_key=%s clause + param tuple."""
+    if customer_key and customer_key != "default":
+        return " AND customer_key=%s", (customer_key,)
+    return "", ()
+
+
+def fetch_distinct_locations(customer_key: str | None = None) -> list[str]:
+    """Distinct location names for a customer_key."""
+    ck, params = _ck_clause(customer_key)
+    rows = query(
+        f"""SELECT DISTINCT name FROM dg_gateway_data
+            WHERE mac_type='Temp-Sensor' AND name IS NOT NULL AND name != ''
+            {ck} ORDER BY name""",
+        params,
+    )
+    return [r["name"] for r in rows]
+
+
+def fetch_sensors_by_location(
+    customer_key: str | None = None, location: str | None = None,
+) -> list[str]:
+    """Distinct MACs, optionally filtered by customer_key and location (name)."""
+    clauses = ["mac_type='Temp-Sensor'"]
+    params: list = []
+    if customer_key and customer_key != "default":
+        clauses.append("customer_key=%s")
+        params.append(customer_key)
+    if location:
+        clauses.append("name=%s")
+        params.append(location)
+    where = " AND ".join(clauses)
+    rows = query(f"SELECT DISTINCT mac FROM dg_gateway_data WHERE {where} ORDER BY mac", tuple(params))
+    return [r["mac"] for r in rows]
+
+
+# ── Sensor queries ───────────────────────────────────────────────────────────
+
+def fetch_latest_per_sensor(customer_key: str | None = None) -> list[dict]:
+    """Latest reading per Temp-Sensor MAC (de-duplicated), with location name."""
+    ck, ck_params = _ck_clause(customer_key)
+    rows = query(
+        f"""SELECT g.mac, g.body_temperature, g.rssi, g.power,
+                   g.date_added, g.tags_id, g.gateway_mac, g.name
+            FROM dg_gateway_data g
+            INNER JOIN (
+                SELECT mac, MAX(date_added) AS max_da
+                FROM dg_gateway_data
+                WHERE mac_type='Temp-Sensor' {ck}
+                GROUP BY mac
+            ) latest ON g.mac = latest.mac AND g.date_added = latest.max_da
+            WHERE g.mac_type='Temp-Sensor' {ck}""",
+        ck_params + ck_params,
+    )
     seen: set[str] = set()
     out: list[dict] = []
     for r in rows:
@@ -100,17 +142,19 @@ def fetch_latest_per_sensor() -> list[dict]:
     return out
 
 
-def fetch_batch_history(mac_list: list[str], since: datetime) -> dict[str, list[dict]]:
+def fetch_batch_history(mac_list: list[str], since: datetime,
+                        customer_key: str | None = None) -> dict[str, list[dict]]:
     """Readings for multiple MACs since cutoff, grouped by MAC."""
     if not mac_list:
         return {}
+    ck, ck_params = _ck_clause(customer_key)
     ph = ",".join(["%s"] * len(mac_list))
     rows = query(
         f"""SELECT mac, body_temperature, date_added
             FROM dg_gateway_data
-            WHERE mac IN ({ph}) AND mac_type='Temp-Sensor' AND date_added >= %s
+            WHERE mac IN ({ph}) AND mac_type='Temp-Sensor' AND date_added >= %s {ck}
             ORDER BY mac, date_added DESC""",
-        (*mac_list, since),
+        (*mac_list, since, *ck_params),
     )
     by_mac: dict[str, list[dict]] = {}
     for r in rows:
@@ -148,8 +192,11 @@ def fetch_max_date(device_id: str) -> Optional[datetime]:
     return row["latest"] if row and row["latest"] else None
 
 
-def fetch_all_devices() -> list[str]:
-    return [r["mac"] for r in query("SELECT DISTINCT mac FROM dg_gateway_data WHERE mac_type='Temp-Sensor'")]
+def fetch_all_devices(customer_key: str | None = None) -> list[str]:
+    ck, params = _ck_clause(customer_key)
+    return [r["mac"] for r in query(
+        f"SELECT DISTINCT mac FROM dg_gateway_data WHERE mac_type='Temp-Sensor' {ck}", params,
+    )]
 
 
 def fetch_locations() -> list[dict]:
@@ -162,13 +209,15 @@ def fetch_locations() -> list[dict]:
     """)
 
 
-def fetch_compliance_batch(start: str, end: str, temp_low: float, temp_high: float) -> list[dict]:
+def fetch_compliance_batch(start: str, end: str, temp_low: float, temp_high: float,
+                           customer_key: str | None = None) -> list[dict]:
     """Compliance per day in one query."""
+    ck, ck_params = _ck_clause(customer_key)
     return query(
-        """SELECT DATE(date_added) AS day, COUNT(*) AS total,
+        f"""SELECT DATE(date_added) AS day, COUNT(*) AS total,
                   SUM(CASE WHEN body_temperature BETWEEN %s AND %s THEN 1 ELSE 0 END) AS compliant
            FROM dg_gateway_data
-           WHERE mac_type='Temp-Sensor' AND date_added BETWEEN %s AND %s
+           WHERE mac_type='Temp-Sensor' AND date_added BETWEEN %s AND %s {ck}
            GROUP BY DATE(date_added) ORDER BY day ASC""",
-        (temp_low, temp_high, start, end),
+        (temp_low, temp_high, start, end, *ck_params),
     )

@@ -41,8 +41,14 @@ class HybridProvider:
         self._readings_cache: dict = {}
         self._loc_cache: dict = {}
         self._loc_ts: float = 0
+        self._locations_cache: list[str] = []
+        self._locations_ts: float = 0
 
     # ── helpers ──────────────────────────────────────────────────────────────
+
+    def _ck(self) -> str | None:
+        """Return customer_key for SQL filtering (None for default/local)."""
+        return self._client_id if self._client_id and self._client_id != "default" else None
 
     def _use_parquet(self) -> bool:
         return self._data_source in ("parquet", "hybrid") and bool(self._pq_bucket)
@@ -50,7 +56,7 @@ class HybridProvider:
     def _use_mysql(self) -> bool:
         return self._data_source in ("mysql", "hybrid")
 
-    def _locations(self) -> dict:
+    def _tag_locations(self) -> dict:
         now = time.time()
         if self._loc_cache and (now - self._loc_ts) < 300:
             return self._loc_cache
@@ -72,6 +78,32 @@ class HybridProvider:
             logger.warning("Location load failed: %s", exc)
         return self._loc_cache
 
+    # ── locations + sensors ──────────────────────────────────────────────────
+
+    def get_locations(self) -> list[str]:
+        now = time.time()
+        if self._locations_cache and (now - self._locations_ts) < 120:
+            return self._locations_cache
+        if not self._use_mysql():
+            return []
+        from app.data import mysql_reader as db
+        try:
+            self._locations_cache = db.fetch_distinct_locations(self._ck())
+            self._locations_ts = now
+        except Exception as exc:
+            logger.warning("fetch_distinct_locations failed: %s", exc)
+        return self._locations_cache
+
+    def get_sensors_for_location(self, location: str | None = None) -> list[str]:
+        if not self._use_mysql():
+            return []
+        from app.data import mysql_reader as db
+        try:
+            return db.fetch_sensors_by_location(self._ck(), location)
+        except Exception as exc:
+            logger.warning("fetch_sensors_by_location failed: %s", exc)
+            return []
+
     # ── sensor states ───────────────────────────────────────────────────────
 
     def get_all_sensor_states(self) -> list[dict]:
@@ -82,18 +114,18 @@ class HybridProvider:
         from app.data import mysql_reader as db
 
         now = datetime.now(timezone.utc)
-        latest_rows = db.fetch_latest_per_sensor()
+        latest_rows = db.fetch_latest_per_sensor(self._ck())
         if not latest_rows:
             self._cache.update(states=[], ts=now_ts)
             return []
 
-        loc_map = self._locations()
+        loc_map = self._tag_locations()
         mac_list = [r["mac"] for r in latest_rows]
         earliest = min(
             (r["date_added"] for r in latest_rows if isinstance(r["date_added"], datetime)),
             default=now,
         ) - timedelta(hours=1)
-        hist = db.fetch_batch_history(mac_list, earliest)
+        hist = db.fetch_batch_history(mac_list, earliest, self._ck())
 
         states = []
         for row in latest_rows:
@@ -191,7 +223,7 @@ class HybridProvider:
             from app.data import mysql_reader as db
             rows = db.fetch_compliance_batch(
                 start.strftime("%Y-%m-%d 00:00:00"), now.strftime("%Y-%m-%d 23:59:59"),
-                cfg.TEMP_LOW, cfg.TEMP_HIGH,
+                cfg.TEMP_LOW, cfg.TEMP_HIGH, self._ck(),
             )
             for r in rows:
                 total = int(r["total"])
@@ -208,10 +240,10 @@ class HybridProvider:
 
     def get_all_devices(self) -> list[str]:
         from app.data import mysql_reader as db
-        return db.fetch_all_devices()
+        return db.fetch_all_devices(self._ck())
 
     def get_zones(self) -> list[str]:
-        loc = self._locations()
+        loc = self._tag_locations()
         return sorted({v["zone_id"] for v in loc.values()})
 
     # ── alerts (delegate to AlertManager) ───────────────────────────────────

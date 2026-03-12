@@ -2,7 +2,8 @@
 
 Serverless single-page dashboard for monitoring temperature sensors in correctional facilities.
 Hybrid data architecture (MySQL Aurora / S3 Parquet), DynamoDB-backed alert management,
-multi-tenant client isolation, and officer-friendly UI designed for real-time operational awareness.
+multi-tenant client isolation with location-based filtering, and officer-friendly UI
+designed for real-time operational awareness.
 
 ## Architecture
 
@@ -27,9 +28,9 @@ multi-tenant client isolation, and officer-friendly UI designed for real-time op
                      └─────────────────────┘
 ```
 
-### Data flow — Hybrid Provider
+### Data Flow — Hybrid Provider
 
-| Flag (`DATA_SOURCE`) | Live readings | Historical (6h–120d) | Notes |
+| Flag (`DATA_SOURCE`) | Live readings | Historical (custom range) | Notes |
 |---|---|---|---|
 | `mysql` | MySQL only | MySQL only | Default; simplest setup |
 | `parquet` | Parquet only | Parquet only | Fastest for large datasets |
@@ -37,6 +38,23 @@ multi-tenant client isolation, and officer-friendly UI designed for real-time op
 
 The `HybridProvider` manages the routing transparently. Readings are cached for 60 seconds
 keyed by `(device_id, range)`. Sensor states are cached for 20 seconds.
+
+### Database Table — `dg_gateway_data`
+
+| Column | Purpose |
+|---|---|
+| `mac` | Sensor MAC address (device identifier) |
+| `mac_type` | Device type — filtered to `Temp-Sensor` |
+| `customer_key` | Client/tenant identifier (maps to `client_id` in app) |
+| `name` | Facility / location name (used for location filter) |
+| `body_temperature` | Temperature reading (°F) |
+| `rssi` | Signal strength (dBm) |
+| `power` | Battery level |
+| `tags_id` | Tag identifier (links to legacy `dg_tags` table) |
+| `date_added` | Timestamp of the reading |
+
+All SQL queries filter by `customer_key` when a valid `client_id` is available,
+ensuring tenant-level data isolation at the database layer.
 
 ### Single-Page UI Layout
 
@@ -46,45 +64,75 @@ keyed by `(device_id, range)`. Sensor states are cached for 20 seconds.
 ├──────────────────────────────────────────────────────────┤
 │ [ACTION REQUIRED]     0/3 Sensors  5 Alerts  72.4°F Avg │
 ├──────────────────────────────────────────────────────────┤
+│ FACILITY/LOCATION ▼  │ SENSOR/MAC ▼  │ 📅 Date Range │↺│
+│ [All Locations      ] │ [All Sensors ] │ [Start] [End] │ │
+├──────────────────────────────────────────────────────────┤
 │ ⚠ 2 Alerts for 00301A80                                 │
 │  [Important] Sensor 00301A80 not responding              │
 │  [📋 Note] [✕ Remove]                                   │
 ├──────────────────────────────────────────────────────────┤
 │ ☉ 3 Sensors          [Show All toggle]                  │
 │ ┌────────┐ ┌────────┐ ┌────────┐                       │
-│ │ 95.8°F*│ │ 95.2°F*│ │ 69.8°F*│                       │
+│ │ 95.8°F │ │ 95.2°F │ │ 69.8°F*│                       │
+│ │Block A │ │Block B │ │Block A │                        │
 │ └────────┘ └────────┘ └────────┘                        │
 ├──────────────────────────────────────────────────────────┤
-│ ● OFFLINE  C30000301A80  69.8°F                         │
+│ ● OFFLINE  C30000301A80 • Block A  69.8°F               │
 │ [HIGH] [LOW] [AVG] [TREND] [FORECAST] [IN RANGE]       │
 │ [BATTERY] [SIGNAL]                                      │
 ├──────────────────────────────────────────────────────────┤
-│ [LIVE] [6h] [12h] [24h] [48h] [7d] [14d] [30d] [60d]  │
-│ [90d] [120d]                                            │
+│ [LIVE] [1h] [6h] [12h] [24h]                           │
 ├──────────────────────────────────────────────────────────┤
 │ ━━━━━━━━ Unified Chart ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  │
 │  Actual line + Forecast + Alert ◆ markers (clickable)    │
 │  Safe zone (65–85°F) + Too Hot / Too Cold thresholds     │
-│  High/Low annotations (staggered, non-overlapping)       │
-│  Downsampled to ~2000 pts for 60–120 day ranges          │
 ├──────────────────────────────────────────────────────────┤
 │ [Compliance Gauge 33.3%]  │  [7-Day Compliance Trend]   │
-│  3 Total, 1 In Range, 2 Out, 2 Hot, 0 Cold             │
 ├──────────────────────────────────────────────────────────┤
 │ Alert History Table                                      │
 │  Priority | Type | What | When | Status                  │
-│  Important  SENSOR_OFFLINE  Sensor not responding  Active│
 └──────────────────────────────────────────────────────────┘
 ```
 
+### Filter System
+
+**Location Filter** (dropdown + search):
+- Populated from the `name` column in `dg_gateway_data` for the current `customer_key`
+- Selecting a location narrows the sensor grid and MAC dropdown to that facility only
+- Searchable — type to find a location quickly
+
+**Sensor/MAC Filter** (dropdown + search):
+- Cascading: options update based on selected location
+- If no location selected, all sensors appear
+- Selecting a sensor directly highlights it and loads its data
+- Searchable — type to find a MAC quickly
+
+**Date Range Picker**:
+- Calendar-based start/end date selection
+- Max range: 4 months (120 days) back from today
+- Dark-themed calendar matching the dashboard style
+- Selecting dates replaces the quick-button range mode with "custom"
+
+**Reset Button**: clears all filters (location, MAC, date range) and returns to LIVE mode.
+
+### Time Range Modes
+
+| Button | Behavior |
+|---|---|
+| **LIVE** (green) | Auto-refreshes every 10s, shows last 2h + 30-min forecast |
+| **1h / 6h / 12h / 24h** | Single fetch, cached, no auto-refresh for readings |
+| **Date Range Picker** | Custom start/end dates (up to 4 months back), single fetch |
+
+Clicking a quick button clears the date range picker. Selecting dates deactivates
+the quick buttons and sets the mode to "custom".
+
 Key UI behaviors:
-- **LIVE mode** (default): auto-refreshes every 10s, shows last 2h + 30-min forecast, green button
-- **History mode** (6h–120d): fetches once on click, caches in browser store, no auto-refresh for readings
 - **Offline sensors**: chart shows dotted line up to last reading, "Last Reading" marker, no forecast
 - **Alert markers**: severity-colored diamonds on the chart at the alert timestamp/temperature
 - **Note click flow**: officer clicks Note → green checkmark → alert auto-dismissed from live → preserved in DynamoDB history
 - **Compliance**: always shows for ALL sensors (including offline); labeled "Last Known Compliance" when all offline
 - **Toggle**: switch between "All Sensors" and "Critical Only" filtering
+- **Location on tiles**: each sensor tile shows its facility/location name
 
 ### Module Structure
 
@@ -109,31 +157,33 @@ TemperatureSensor/
     │   ├── auth.py         (134) Cookie signing, Secrets Manager tokens
     │   ├── routes.py       (104) Flask middleware, /connect, /healthz
     │   ├── main.py          (64) Dash app creation, navbar, clock
+    │   ├── assets/
+    │   │   └── style.css   (139) Dark theme: dropdowns, date picker, calendar
     │   ├── data/
-    │   │   ├── provider.py  (36) DataProvider protocol + factory
-    │   │   ├── mysql_reader.py (174) Thread-local pool + SQL queries
+    │   │   ├── provider.py  (38) DataProvider protocol + factory
+    │   │   ├── mysql_reader.py (223) Thread-local pool + SQL queries
     │   │   ├── parquet_reader.py (110) S3 daily Parquet with cache
-    │   │   ├── analytics.py (174) Stats, anomaly detection, forecasting
+    │   │   ├── analytics.py (175) Stats, anomaly detection, forecasting
     │   │   ├── alert_manager.py (250) DynamoDB lifecycle (moto locally)
-    │   │   └── hybrid_provider.py (230) Orchestrator: data + analytics
+    │   │   └── hybrid_provider.py (262) Orchestrator: data + analytics
     │   └── pages/
     │       ├── charts.py   (284) unified_chart(), compliance figures
-    │       └── monitor.py  (573) Single-page: data pump + all UI
+    │       └── monitor.py  (719) Single-page: filters + data pump + UI
     └── tests/
         ├── conftest.py      (44) Flask context + MockProvider fixture
-        ├── mock_provider.py (98) Deterministic 3-sensor test data
+        ├── mock_provider.py (111) Deterministic 3-sensor + 2-location data
         └── unit/
             ├── test_alert_manager.py (131) Alert lifecycle + note/dismiss
             ├── test_analytics.py     (148) Stats, anomaly, forecast
             ├── test_auth.py          (249) Cookie, tokens, hints
             ├── test_config.py         (35) Theme + threshold validation
             ├── test_lambda_handler.py (49) Lambda handler basics
-            ├── test_monitor.py       (256) All UI callbacks (12 classes)
-            ├── test_provider.py       (74) Protocol + factory + mock
+            ├── test_monitor.py       (353) Filters, date range, all callbacks
+            ├── test_provider.py       (75) Protocol + factory + mock
             └── test_routes.py         (71) Flask routes + middleware
 ```
 
-Total: **2,223 lines of application code**, **1,155 lines of test code**, **139 unit tests**.
+Total: **2,592 lines of application code**, **1,266 lines of test code**, **155 unit tests**.
 
 ### Alert System
 
@@ -175,9 +225,10 @@ All data fetching happens in a single `data_pump` callback. Display callbacks re
 
 ```
   10s Interval ─┐
-  Range Click ──┤──▶ data_pump ──▶ Store: states
-  Sensor Click ─┘                  Store: alerts
-                                   Store: compliance
+  Range Click ──┤
+  Sensor Click ─┤──▶ data_pump ──▶ Store: states
+  Date Range ───┤                  Store: alerts
+  Location ─────┘                  Store: compliance
                                    Store: readings (+ forecast + alert history)
                                         │
                          ┌───────────────┼────────────────┐
@@ -187,12 +238,14 @@ All data fetching happens in a single `data_pump` callback. Display callbacks re
                    render_alerts  render_range_bar
 ```
 
-This eliminates serial callback latency — every display callback executes instantly from cached stores.
+Filter callbacks (location → MAC cascade, date range → range-mode) operate independently
+and feed into the data pump via stores. This eliminates serial callback latency.
 
 ### Multi-Tenancy
 
 - Each server runs one Lambda (or Gunicorn process) serving multiple clients
-- Client isolation via `client_id` set in auth middleware (row-level, shared schema)
+- Client isolation via `customer_key` in MySQL + `client_id` in auth middleware
+- All SQL queries filter by `customer_key` when a valid `client_id` is present
 - Access tokens stored in AWS Secrets Manager: `TempMonitor/{deployment_id}/{client_id}`
 - Officers visit `/connect/{token}` → signed HttpOnly cookie → 30-day session
 - Alerts isolated by `client_id` in DynamoDB GSI (`ClientActiveAlerts`)
@@ -205,25 +258,18 @@ server3 → clients A, B, C
 serverX → dev/staging (shared)
 ```
 
-Processing is singleton per server; data and details are segregated per client.
-
 ### Unified Chart
 
 One chart handles all modes — no separate live/offline/history charts:
 
-| Feature | LIVE mode | History mode (6h–120d) | Offline |
-|---|---|---|---|
-| Actual line | Solid, orange | Solid, orange | Dotted, gray |
-| Forecast | 30-min ahead, CI band | Hidden | Hidden |
-| Safe zone (65–85°F) | Shown | Shown | Shown |
-| Threshold lines | Too Hot / Too Cold | Too Hot / Too Cold | Too Hot / Too Cold |
-| High/Low markers | Right side, staggered | Right side, staggered | Right side, staggered |
-| "Now" / "Last Reading" | "Now" dashed line | None | "Last Reading" dashed line |
-| Alert diamonds | Severity-colored | Severity-colored | Severity-colored |
-| Downsampling | No (< 2000 pts) | Min-max-mean (> 2000 pts) | No |
-
-Annotations use `annotation_position` to prevent overlapping. Long ranges (60–120 days)
-connect sparse data with lines — no blank gaps.
+| Feature | LIVE mode | Quick Range (1h–24h) | Custom Date Range | Offline |
+|---|---|---|---|---|
+| Actual line | Solid, orange | Solid, orange | Solid, orange | Dotted, gray |
+| Forecast | 30-min ahead, CI band | Hidden | Hidden | Hidden |
+| Safe zone (65–85°F) | Shown | Shown | Shown | Shown |
+| Threshold lines | Too Hot / Too Cold | Too Hot / Too Cold | Too Hot / Too Cold | Too Hot / Too Cold |
+| Alert diamonds | Severity-colored | Severity-colored | Severity-colored | Severity-colored |
+| Downsampling | No (< 2000 pts) | No | Min-max-mean (> 2000 pts) | No |
 
 ## Quick Start (Local)
 
@@ -245,7 +291,7 @@ make run                           # http://localhost:8051
 make run-debug                     # http://localhost:8051
 
 # 5. Test + lint
-make test                          # 139 unit tests
+make test                          # 155 unit tests
 make lint                          # ruff check (0 errors)
 ```
 
@@ -296,6 +342,7 @@ Rollback: re-run the CD workflow for a previous tag, or `git checkout v1.0.0 && 
 | `ALERT_COOLDOWN_SEC` | 300 | Seconds before a dismissed alert can re-trigger |
 | `ALERT_OFFLINE_THRESHOLD_SEC` | 300 | Seconds of silence before "offline" |
 | `ALERT_DEGRADED_THRESHOLD_SEC` | 120 | Seconds of silence before "degraded" |
+| `MAX_HISTORY_DAYS` | 120 | Maximum days for date range picker (4 months) |
 
 ## Dependencies
 
