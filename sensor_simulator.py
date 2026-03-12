@@ -434,12 +434,37 @@ def _run_generator(provider: SimulatorProvider, interval: float):
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 
+def _bootstrap():
+    """Seed provider and inject into app.data.provider cache."""
+    import os
+    import sys
+    dashboard_dir = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "dashboard")
+    if dashboard_dir not in sys.path:
+        sys.path.insert(0, dashboard_dir)
+
+    provider = SimulatorProvider()
+    provider.seed_history()
+
+    t = threading.Thread(target=_run_generator, args=(provider, 5.0),
+                         daemon=True)
+    t.start()
+
+    import app.data.provider as prov_mod
+    prov_mod._providers["demo_client_1"] = provider
+    prov_mod._providers["default"] = provider
+    prov_mod._providers[None] = provider
+    return provider
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Run TempMonitor dashboard with simulated sensors")
     parser.add_argument("--port", type=int, default=8051)
     parser.add_argument("--interval", type=float, default=5.0,
                         help="Seconds between new readings")
+    parser.add_argument("--threaded", action="store_true", default=True,
+                        help="Use threaded Flask server (default)")
     args = parser.parse_args()
 
     import os
@@ -471,10 +496,15 @@ def main():
     print(f"\n   📊 History: {HISTORY_DAYS} days  |  📈 Readings: {total:,}"
           f"  |  🔄 Interval: {args.interval}s")
     print(f"\n🚀 Dashboard at http://localhost:{args.port}")
-    print("   No database — all data is in-memory.  Ctrl+C to stop.\n")
+    print("   Threaded server for faster UI.  Ctrl+C to stop.\n")
 
-    from app.main import app
-    app.run(debug=False, host="0.0.0.0", port=args.port)
+    from app.main import app, server
+    from werkzeug.serving import run_simple
+    run_simple(
+        "0.0.0.0", args.port, server,
+        use_reloader=False, use_debugger=False,
+        threaded=True,
+    )
 
 
 if __name__ == "__main__":

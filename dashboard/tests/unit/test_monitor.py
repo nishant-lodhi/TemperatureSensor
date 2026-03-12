@@ -85,7 +85,7 @@ class TestStatusBar:
     def test_active_filter(self):
         from app.pages.monitor import render_status_bar
         html_str = str(render_status_bar(_states(), _alerts(), "red", None))
-        assert "filter-pill-active" in html_str
+        assert "fpill-on" in html_str
 
 
 class TestRenderGrid:
@@ -190,23 +190,23 @@ class TestRenderAlerts:
 class TestRenderCompliance:
     def test_returns(self):
         from app.pages.monitor import render_compliance
-        assert render_compliance(_states(), _comp()) is not None
+        assert render_compliance(_states(), _comp(), None) is not None
 
     def test_labels(self):
         from app.pages.monitor import render_compliance
-        html_str = str(render_compliance(_states(), _comp()))
+        html_str = str(render_compliance(_states(), _comp(), None))
         assert "Compliance" in html_str
 
     def test_empty(self):
         from app.pages.monitor import render_compliance
-        assert str(render_compliance([], [])).strip() != ""
+        assert str(render_compliance([], [], None)).strip() != ""
 
     def test_all_offline(self):
         from app.pages.monitor import render_compliance
         states = _states()
         for s in states:
             s["status"] = "offline"
-        assert "Last Known Compliance" in str(render_compliance(states, _comp()))
+        assert "Last Known" in str(render_compliance(states, _comp(), None))
 
 
 class TestRenderAlertTable:
@@ -227,7 +227,7 @@ class TestRangeBar:
 
     def test_active(self):
         from app.pages.monitor import render_range_bar
-        assert "range-btn-active" in str(render_range_bar("6"))
+        assert "rbtn-on" in str(render_range_bar("6"))
 
     def test_no_old_ranges(self):
         from app.pages.monitor import render_range_bar
