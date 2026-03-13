@@ -29,8 +29,8 @@ on:
         type: choice
         options:
           - dev
-          - staging
-          - prod-server1
+          # - staging
+          # - prod-server1
           # Add more prod servers here as you onboard them:
           # - prod-server2
           # - prod-server3
@@ -127,12 +127,18 @@ jobs:
 
       - name: SAM deploy to ${{ matrix.target }}
         run: |
+          OVERRIDES=""
+          if [ -n "${{ secrets.MYSQL_PASSWORD }}" ]; then
+            OVERRIDES="$OVERRIDES MysqlPassword=${{ secrets.MYSQL_PASSWORD }}"
+          fi
+          if [ -n "${{ secrets.COOKIE_SECRET }}" ]; then
+            OVERRIDES="$OVERRIDES CookieSecret=${{ secrets.COOKIE_SECRET }}"
+          fi
+
           sam deploy \
             --config-env ${{ matrix.target }} \
             --config-file infra/samconfig.toml \
-            --parameter-overrides \
-              "MysqlPassword=${{ secrets.MYSQL_PASSWORD }}" \
-              "CookieSecret=${{ secrets.COOKIE_SECRET }}" \
+            ${OVERRIDES:+--parameter-overrides $OVERRIDES} \
             --no-confirm-changeset \
             --no-fail-on-empty-changeset
 
