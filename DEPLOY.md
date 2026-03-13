@@ -313,23 +313,48 @@ http://localhost:8051
 
 You should see the TempSensor dashboard with your sensors.
 
-### Step 5: Run Tests, Lint, and Validate
+### Step 5: Pre-Push Validation (Run Before Every Push)
+
+Run these checks locally to catch issues **before** they reach CI/CD. This saves time — a failed CI run takes 3-5 minutes to discover vs. seconds locally.
 
 ```bash
 cd dashboard
 
-# Run all 161 unit tests (takes ~3 seconds)
-python -m pytest tests/ -v
-
-# Run the linter (should show 0 errors)
+# ── 1. Lint (code style) ──────────────────────────────────────────────────
 python -m ruff check app/ tests/
+# Expected: "All checks passed!" — if errors, fix them before pushing
 
-# Validate the SAM infrastructure template (catches config errors before deploy)
+# ── 2. Unit tests ─────────────────────────────────────────────────────────
+python -m pytest tests/ -v --tb=short
+# Expected: "158 passed" — if any fail, fix before pushing
+
+# ── 3. SAM template validation ────────────────────────────────────────────
 pip install aws-sam-cli    # one-time install if you haven't already
 sam validate --template-file ../infra/template.yaml --lint
+# Expected: "...is a valid SAM Template" — catches syntax/config errors
+
+# ── 4. SAM build (dry run — catches runtime/dependency mismatches) ────────
+sam build --template-file ../infra/template.yaml
+# Expected: "Build Succeeded"
+# This catches issues like:
+#   - Python runtime mismatch (e.g., template says 3.11 but you have 3.10)
+#   - Missing dependencies in requirements.txt
+#   - Invalid handler path
+# Tip: your local Python version must match the Runtime in template.yaml
 ```
 
-**All three must pass** before you commit any code changes. These are the same checks the CI pipeline runs automatically on every Pull Request.
+**All four must pass** before you push. These are the same checks CI/CD runs — validating locally avoids waiting for a remote failure.
+
+**Quick one-liner** (copy-paste to run all 4 checks):
+
+```bash
+cd dashboard && \
+  python -m ruff check app/ tests/ && \
+  python -m pytest tests/ -q --tb=short && \
+  sam validate --template-file ../infra/template.yaml --lint && \
+  sam build --template-file ../infra/template.yaml && \
+  echo "✓ All pre-push checks passed — safe to push"
+```
 
 ### Data Source Switching
 
@@ -1115,9 +1140,9 @@ aws lambda update-alias \
 
 If you want to deploy manually from your terminal without using GitHub Actions:
 
-### Step 1: Run Tests and Lint (Same as CI)
+### Step 1: Pre-Deploy Validation (Same as CI + Build Check)
 
-Before deploying anything, make sure the code is clean — exactly the same checks the CI pipeline runs:
+Before deploying anything, run the full local validation — lint, test, validate, AND build:
 
 ```bash
 cd TemperatureSensor/dashboard
@@ -1130,9 +1155,17 @@ python -m pytest tests/ -v --tb=short
 
 # 1c. Validate SAM template — catches infrastructure config errors
 sam validate --template-file ../infra/template.yaml --lint
+
+# 1d. SAM build — catches runtime mismatches, missing dependencies
+sam build --template-file ../infra/template.yaml
 ```
 
-**Do NOT proceed to Step 2 unless all three pass.** If any fail, fix the issues first.
+**Do NOT proceed to Step 2 unless all four pass.** If any fail, fix the issues first.
+
+> **Common build failures:**
+> - `Binary validation failed for python` → your local Python version doesn't match the `Runtime` in `template.yaml` (both must be `python3.10`)
+> - `No module named X` → dependency missing from `dashboard/requirements.txt`
+> - `unable to find handler` → check `Handler` in template.yaml matches the actual file/function
 
 ### Step 2: Build
 
@@ -1227,6 +1260,7 @@ aws cloudformation describe-stacks \
 | **Alerts not appearing** | DynamoDB table missing | Check `ALERTS_TABLE`; locally, moto auto-creates it |
 | **Cookie expired** | 30-day timeout | Officer revisits `/connect/{token}` |
 | **CI fails on "sam validate"** | SAM CLI not installed | The CI workflow installs it; check pip step |
+| **CD "sam build" fails: Binary validation** | Python version mismatch | Template `Runtime` (e.g., `python3.10`) must match the Python version in the workflow `setup-python`. Run `sam build` locally first to catch this |
 | **CD "Waiting for review"** | Prod needs approval | Go to Actions → click "Review deployments" → Approve |
 | **CD "AccessDenied" error** | AWS keys invalid or missing permissions | Verify `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` in GitHub Secrets; check IAM user has `PowerUserAccess` + `IAMFullAccess` |
 
