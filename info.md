@@ -17,8 +17,9 @@ exactly how the system works, end to end.
 7. [Dashboard UI](#7-dashboard-ui)
 8. [Callback Architecture](#8-callback-architecture)
 9. [Chart System](#9-chart-system)
-10. [Simulator](#10-simulator)
-11. [Testing Strategy](#11-testing-strategy)
+10. [Timezone Handling](#10-timezone-handling)
+11. [Simulator](#11-simulator)
+12. [Testing Strategy](#12-testing-strategy)
 
 ---
 
@@ -118,6 +119,7 @@ class DataProvider(Protocol):
     def get_alert_history(self, device_id, days) -> list[dict]: ...
     def dismiss_alert(self, device_id, alert_type) -> None: ...
     def send_alert_note(self, device_id, alert_type, context) -> bool: ...
+    def get_db_time(self) -> datetime | None: ...
 ```
 
 The factory function `get_provider(client_id)` returns a cached `HybridProvider` instance.
@@ -125,12 +127,18 @@ During testing, the `SimulatorProvider` or `MockProvider` replaces it via the `_
 
 ### 3.2 MySQL Reader
 
-**File**: `dashboard/app/data/mysql_reader.py` (228 lines)
+**File**: `dashboard/app/data/mysql_reader.py` (311 lines)
 
 **Connection management**: Uses thread-local storage (`threading.local()`) so each thread
 gets its own MySQL connection. Connections are recycled after `MYSQL_MAX_CONN_AGE` seconds (50s)
 to prevent stale connections. Every query has automatic retry — if the first attempt fails
 (broken pipe, timeout), the connection is closed, a fresh one is created, and the query retries.
+
+**Timezone detection**: The module maintains a cached timezone offset (`_tz_offset`) that
+represents the difference between the DB server's `NOW()` (UTC) and the `date_added` column's
+timezone (typically US/Eastern). This is detected automatically by `_detect_tz_offset()` and
+cached for 1 hour. `fetch_db_now()` applies this offset so all time anchoring aligns with
+`date_added` values. See [Section 10: Timezone Handling](#10-timezone-handling) for full details.
 
 **Key queries**:
 
@@ -142,12 +150,15 @@ to prevent stale connections. Every query has automatic retry — if the first a
 | `fetch_compliance_batch` | Daily compliance for a date range | `GROUP BY DATE(date_added)` with `SUM(CASE WHEN BETWEEN)` |
 | `fetch_distinct_locations` | Unique facility names | `DISTINCT name` filtered by `client_id` |
 | `fetch_sensors_by_location` | MACs at a specific facility | `WHERE name=%s` with optional `client_id` filter |
+| `fetch_db_now` | Current time aligned with `date_added` timezone | `SELECT NOW()` minus detected timezone offset |
 
 All queries filter by `client_id` via `_client_clause()`. The DB column is `customer_key`
 but application code uses `client_id` exclusively — the mapping happens once in
 `_client_clause()`. For isolated-DB clients (own database), no filter is added.
 
-### 2.5 Client Registry (`client_registry.py`)
+### 3.3 Client Registry (`client_registry.py`)
+
+**File**: `dashboard/app/data/client_registry.py` (199 lines)
 
 The registry loads `clients.yaml` at startup and provides per-client configuration:
 
@@ -170,7 +181,7 @@ The registry supports two isolation modes:
 with the correct host, user, password, and database. Connections are pooled per-client
 in thread-local storage.
 
-### 3.3 Parquet Reader
+### 3.4 Parquet Reader
 
 **File**: `dashboard/app/data/parquet_reader.py` (111 lines)
 
@@ -181,11 +192,11 @@ Each file contains all sensor readings for one UTC day. The reader:
 2. For each date, checks in-memory cache (keyed by `{bucket}/{prefix}{date}`)
 3. If not cached or expired (`PARQUET_CACHE_TTL`), downloads from S3
 4. Filters by `device_id` and `date_added` range
-5. Returns `[{timestamp, temperature}]`
+5. Returns `[{timestamp, temperature}]` with timestamps formatted without "Z" suffix (DB local time)
 
-### 3.4 Hybrid Provider
+### 3.5 Hybrid Provider
 
-**File**: `dashboard/app/data/hybrid_provider.py` (277 lines)
+**File**: `dashboard/app/data/hybrid_provider.py` (315 lines)
 
 The orchestrator that ties everything together. Each method follows this pattern:
 1. Check cache → return if fresh
@@ -194,28 +205,47 @@ The orchestrator that ties everything together. Each method follows this pattern
 4. Cache the result
 5. Return
 
+**DB time anchoring** (`_db_now()`): every time-sensitive operation uses `mysql_reader.fetch_db_now()`
+as its reference point, not `datetime.now()` or `datetime.utcnow()`. This ensures all
+calculations (sensor age, query ranges, compliance boundaries, forecast timestamps)
+are in the same timezone as the `date_added` column.
+
 **Sensor state building** (`get_all_sensor_states`):
 1. Fetch latest reading per sensor from MySQL
 2. Fetch 1-hour history for all sensors (batch query)
-3. For each sensor: call `analytics.build_sensor_state()` which computes rolling stats,
-   rate of change, anomaly detection, signal label, battery percentage, and status
+3. For each sensor: call `analytics.build_sensor_state()` with `now=db_now` which computes
+   rolling stats, rate of change, anomaly detection, signal label, battery percentage, and status
 4. Cache for 15s
 
 **Readings** (`get_readings`):
 1. Try Parquet (if enabled) → fall back to MySQL
 2. For MySQL: convert `body_temperature` + `date_added` to `{timestamp, temperature}` dicts
-3. Cache for 60s keyed by `(device_id, since, until)`
+3. Timestamps formatted as `%Y-%m-%dT%H:%M:%S` (no "Z" — already in DB local time)
+4. Default `until` parameter is `_db_now()` if not specified
+5. Cache for 60s keyed by `(device_id, since, until)`
 
 **Forecast** (`get_forecast`, `get_forecast_series`):
 1. Get last 30 minutes of readings for the sensor
 2. Run `analytics.forecast_params()` → linear regression
-3. Generate forecast series (30 steps × 1 minute each)
+3. Generate forecast series (30 steps × 1 minute each) using `_db_now()` as reference time
+4. Forecast timestamps formatted without "Z" suffix
+
+**Compliance history** (`get_compliance_history`):
+1. Fetch daily compliance data from MySQL for the specified date range
+2. **Deduplicate**: if the same date appears multiple times, keep only the first entry
+3. **Fill missing dates**: iterate day-by-day from `start` to `db_now`, inserting `{"date": "...", "compliance_pct": 0.0}` for any day with no data
+4. Cache for 60s
+
+**Alert evaluation** (`get_live_alerts`):
+1. Fetch current sensor states
+2. Call `self._alerts.evaluate(states, now_dt=self._db_now())` — passing DB local time
+   so alert timestamps match the data timezone, not server UTC
 
 ---
 
 ## 4. Analytics Engine
 
-**File**: `dashboard/app/data/analytics.py` (175 lines)
+**File**: `dashboard/app/data/analytics.py` (180 lines)
 
 All functions are **pure** — they take data in, return results out. No database calls, no
 side effects, no state. This makes them trivially testable and cacheable.
@@ -243,7 +273,18 @@ Two-layer detection:
 Both checks return `(is_anomaly: bool, reason: str)`.
 
 ### Sensor Status
-Based on how long since the sensor's last reading:
+Based on how long since the sensor's last reading. The age calculation uses **naive datetime
+comparison** — both `now` and `last_seen` have their `tzinfo` stripped before subtraction.
+This is critical because `now` comes from `fetch_db_now()` (UTC minus offset = local naive)
+and `last_seen` is already naive (from `date_added`):
+
+```python
+ls = last_seen.replace(tzinfo=None) if last_seen.tzinfo else last_seen
+n = now.replace(tzinfo=None) if now.tzinfo else now
+age_sec = (n - ls).total_seconds()
+```
+
+Thresholds:
 - `< 2 min`: online
 - `2–5 min`: degraded
 - `> 5 min`: offline
@@ -258,17 +299,21 @@ The forecast is intentionally simple (linear) because sensor temperature trends
 tend to be monotonic over short periods. The CI widens with the square root of steps,
 reflecting increasing uncertainty.
 
+Forecast timestamps are formatted as `%Y-%m-%dT%H:%M:00` (no "Z" suffix), using
+the reference time from `_db_now()`.
+
 ### Build Sensor State
 The master function that assembles a complete sensor state dict from raw data:
 1. Parse temperature, handle invalid values
-2. Calculate age → determine status
+2. Calculate age using timezone-aligned naive datetimes → determine status
 3. Extract 1-hour history → rolling stats
 4. Compute rate of change
 5. Run anomaly detection
 6. Parse RSSI → signal label
 7. Parse battery → percentage
 8. Attach location from `name` column or legacy tag mapping
-9. Return a flat dict with 20+ fields
+9. Format `last_seen` as `%Y-%m-%dT%H:%M:%S` (no "Z")
+10. Return a flat dict with 20+ fields
 
 ---
 
@@ -296,7 +341,9 @@ Condition triggers → ACTIVE
 
 ### Evaluation
 
-Every 15 seconds, `evaluate()` runs through all sensor states and checks 6 conditions:
+Every 15 seconds, `evaluate(sensor_states, now_dt)` runs through all sensor states and checks 6 conditions.
+The `now_dt` parameter receives the DB-local time from `hybrid_provider._db_now()` so that
+all alert timestamps (`triggered_at`, `resolved_at`) are in the same timezone as the sensor data.
 
 ```python
 ALERT_CONDITIONS = [
@@ -313,6 +360,15 @@ For each (sensor, condition) pair:
 - **If triggered and no existing alert**: create new alert in memory + DynamoDB
 - **If triggered but in cooldown**: skip (prevents alert spam after dismiss)
 - **If NOT triggered but alert exists**: auto-resolve (move to RESOLVED state)
+
+### Timestamp Consistency
+
+All alert timestamps use the same timezone as sensor data:
+- `triggered_at`: from `now_dt` parameter (DB local time)
+- `resolved_at`: `datetime.now().isoformat()` (naive local, matching DB timezone)
+- `dismissed_at`: same as `resolved_at`
+
+This ensures alert timestamps displayed on the chart align with reading timestamps.
 
 ### Deduplication
 
@@ -375,11 +431,11 @@ preserved in DynamoDB with state `DISMISSED`.
 
 ### Middleware
 
-**File**: `dashboard/app/routes.py` (105 lines)
+**File**: `dashboard/app/routes.py` (109 lines)
 
 `@server.before_request` runs before every Flask request:
 1. In local mode (`AWS_MODE=false`): sets `g.client_id = "demo_client_1"`, returns
-2. Checks for skip paths (`/connect/`, `/assets/`, etc.)
+2. Checks for skip paths (`/connect/`, `/assets/`, `/healthz`, etc.)
 3. Reads cookie → verifies signature → checks expiry → validates token hint
 4. Sets `g.client_id` and `g.client_name` for the request
 
@@ -387,11 +443,14 @@ preserved in DynamoDB with state `DISMISSED`.
 
 ## 7. Dashboard UI
 
-**File**: `dashboard/app/pages/monitor.py` (1,098 lines)
+**File**: `dashboard/app/pages/monitor.py` (1,105 lines)
 
 ### Layout Structure
 
-The `layout()` function returns the page skeleton:
+The `layout()` function returns the page skeleton. It initialises `today` using
+`prov.get_db_time().date()` (falling back to UTC) so the date range picker's default
+aligns with the DB's current date:
+
 - **Stores**: 7 `dcc.Store` components hold all state (no global variables)
 - **Banner**: facility name, sensor count, alert count, average temp
 - **Filter bar**: location dropdown, sensor dropdown, date picker, reset button
@@ -403,6 +462,21 @@ The `layout()` function returns the page skeleton:
 - **Chart**: unified Plotly chart with actual line, forecast, safe zone, alert markers
 - **Compliance**: gauge + stats + 7-day trend line chart
 - **Alert table**: DataTable with sortable columns and severity highlighting
+
+### Navbar Clock
+
+**File**: `dashboard/app/main.py` (121 lines)
+
+The clock callback (`update_clock`) runs every second and displays the current time in
+the navbar. On the first tick, it auto-detects the timezone offset:
+
+1. Calls `prov.get_db_time()` to get DB-local current time
+2. Computes `_clock_offset = db_now - datetime.now(timezone.utc).replace(tzinfo=None)`
+3. On every subsequent tick: `display = utc_now + _clock_offset`
+4. Shows label "Local" if offset was detected, "UTC" if not
+
+This means the navbar always shows the facility's local time (e.g., US/Eastern) without
+requiring any explicit timezone configuration.
 
 ### Clientside Callbacks (Zero Server Round-Trip)
 
@@ -416,15 +490,43 @@ Six JavaScript callbacks handle instant interactions:
 
 These run entirely in the browser — no network request.
 
+### KPIs
+
+The `render_kpis` callback displays 8 information cards for the selected sensor:
+
+| Card | Source | Display |
+|---|---|---|
+| High | 1h rolling max | Temperature in °F |
+| Low | 1h rolling min | Temperature in °F |
+| Avg | 1h rolling mean | Temperature in °F |
+| Trend | Rate of change | Rising ↑ / Steady → / Falling ↓ |
+| Forecast (or "Last" for offline) | Linear regression point estimate | Temperature in °F |
+| In Range | Last N readings compliance % | Percentage |
+| Battery | `power` column | Percentage (always shown, even when offline) |
+| Signal | RSSI → label | Strong/Good/Weak/No Signal |
+
+An anomaly alert box appears when `anomaly=True` with the anomaly reason.
+
 ### Compliance Calculation
 
-The `render_compliance` callback carefully separates online and offline sensors:
+The `render_compliance` callback uses **total sensors** as the denominator, not just online ones:
+
 1. Filter by facility if location filter active
 2. Separate `online` and `offline` lists
-3. Calculate In Range, Too Hot, Too Cold from **online sensors only**
-4. Calculate compliance percentage from online count
-5. Count offline separately
-6. Display gauge + stats + 7-day trend
+3. Count In Range, Too Hot, Too Cold from online sensors
+4. `pct = in_range / total * 100` — offline sensors reduce the compliance score
+5. Count offline sensors separately
+6. Display gauge + stats + 7-day trend (with missing dates filled to 0%)
+
+**Example**: 3 sensors total, 1 in-range, 2 offline → compliance = 33.3% (not 100%).
+
+### Time-Formatting Helper
+
+`_fmt_time(iso)` converts ISO strings to display format:
+1. Strips "Z" suffix if present (all timestamps are already in DB local time)
+2. Parses with `datetime.fromisoformat()`
+3. Formats as `"Mar 13, 14:30"` for display
+4. Returns empty string on any parsing error
 
 ---
 
@@ -434,8 +536,8 @@ The `render_compliance` callback carefully separates online and offline sensors:
 
 **Slow path** (`state_pump`, every 15s):
 - Fetches ALL sensor states (latest reading per sensor + analytics)
-- Fetches ALL live alerts
-- Fetches 7-day compliance history
+- Fetches ALL live alerts (passes `now_dt=db_now` for timestamp alignment)
+- Fetches 7-day compliance history (with filled dates)
 - Auto-selects first visible sensor if none selected
 
 **Fast path** (`readings_pump`, on user action):
@@ -448,13 +550,28 @@ The `render_compliance` callback carefully separates online and offline sensors:
 AND the mode is NOT "live", it returns `no_update` — skipping unnecessary historical data
 re-fetches.
 
+### Time Anchoring in `_fetch_readings`
+
+The `_fetch_readings` function uses `prov.get_db_time()` as the sole time anchor:
+
+| Mode | `since` | `until` | `x_until` (chart right edge) |
+|---|---|---|---|
+| LIVE (online) | db_now − 2h | db_now | db_now + 1h (forecast window) |
+| LIVE (offline) | last_seen − 2h | last_seen | last_seen |
+| 1h / 6h / 12h / 24h | db_now − Nh | db_now | db_now |
+| Custom date range | start 00:00:00 | end 23:59:59 | end 23:59:59 |
+
+For LIVE mode, the `x_until = db_now + 1h` creates a 1-hour window ahead of "now":
+30 minutes for the forecast line + 30 minutes of buffer. This prevents blank space on the
+chart after the forecast ends.
+
 ### Store-Based Architecture
 
 All data lives in `dcc.Store` components (client-side JSON):
 - `store-states`: list of all sensor state dicts
 - `store-alerts`: list of live alert dicts
 - `store-compliance`: list of daily compliance dicts
-- `store-readings`: readings + forecast + alert history for one sensor
+- `store-readings`: readings + forecast + alert history for one sensor, plus `since` and `until` for chart ranging
 - `mon-selected`: currently selected sensor MAC
 - `range-mode`: "live", "1", "6", "12", "24", or "custom"
 - `store-date-range`: `{start, end}` for custom date range
@@ -466,13 +583,14 @@ Display callbacks read from stores and render HTML — they never call the datab
 
 ## 9. Chart System
 
-**File**: `dashboard/app/pages/charts.py` (348 lines)
+**File**: `dashboard/app/pages/charts.py` (364 lines)
 
 ### Unified Chart
 
-`unified_chart()` builds a single Plotly figure:
+`unified_chart()` builds a single Plotly figure with explicit X-axis control:
 
-1. **Safe zone**: semi-transparent rectangle between `TEMP_LOW` and `TEMP_HIGH`
+1. **Safe zone**: semi-transparent rectangle between `TEMP_LOW` and `TEMP_HIGH`, spanning the full
+   `x_since` → `x_until` range (not just the data extent)
 2. **Actual line**: solid teal line for readings (dotted gray for offline)
 3. **Forecast** (LIVE mode only):
    - CI band: upper/lower confidence bounds, filled region
@@ -482,6 +600,31 @@ Display callbacks read from stores and render HTML — they never call the datab
 5. **High/Low markers**: dashed lines at the actual max and min temperatures
 6. **Alert markers**: scatter plot of diamonds at alert timestamps, colour-coded by severity
 7. **"Now" marker**: vertical dashed line at the boundary between actual and forecast
+
+### X-Axis Range Locking
+
+The chart always locks its X-axis to the requested time window, regardless of data availability:
+
+```python
+if x_since and x_until:
+    xaxis["range"] = [x_since, x_until]
+```
+
+**Why**: without this, Plotly auto-fits the axis to the data extent. If a user selects "6h"
+but only has 30 minutes of data, the chart would zoom to 30 minutes — making the time
+buttons appear broken. Locking the axis shows the full 6-hour window with the 30 minutes of
+data positioned correctly.
+
+### Empty Data Handling
+
+When the readings list is empty but `x_since`/`x_until` are provided, the chart still renders:
+- Safe zone band fills the full range
+- Threshold lines are drawn
+- A centred annotation reads "No readings in this range"
+- The graph structure (axes, grid) remains visible
+
+This replaces the old behavior of returning a blank "Select a sensor" placeholder when no
+data existed for a date range.
 
 ### Downsampling
 
@@ -497,7 +640,61 @@ maintaining chart shape while reducing render time.
 
 ---
 
-## 10. Simulator
+## 10. Timezone Handling
+
+The most subtle aspect of the system. Sensors in a Florida facility report data
+with `date_added` timestamps in US/Eastern, but the MySQL server's `NOW()` returns UTC.
+
+### The Problem
+
+If the code naively compares `NOW()` (UTC 18:30) with `MAX(date_added)` (Eastern 14:30),
+it calculates an age of 4 hours — marking the sensor as offline even though it reported
+5 seconds ago.
+
+### The Solution
+
+**`mysql_reader._detect_tz_offset()`**:
+1. Runs `SELECT NOW() AS server_now`
+2. Runs `SELECT MAX(date_added) ... WHERE mac_type='Temp-Sensor'`
+3. Computes `offset_hours = round((server_now - latest).total_seconds() / 3600)`
+4. Returns `timedelta(hours=offset_hours)`
+5. Caches the offset for 1 hour
+
+**`mysql_reader.fetch_db_now()`**:
+1. Runs `SELECT NOW() AS server_now`
+2. Returns `server_now - _detect_tz_offset()` → result is in `date_added`'s timezone
+
+### Where It's Used
+
+| Location | How it uses `fetch_db_now()` |
+|---|---|
+| `hybrid_provider.get_all_sensor_states()` | Passes `now=db_now` to `build_sensor_state()` for accurate age calculation |
+| `hybrid_provider.get_readings()` | Default `until` parameter for time queries |
+| `hybrid_provider.get_compliance_history()` | End date for day-filling loop |
+| `hybrid_provider.get_live_alerts()` | `now_dt` parameter to `alert_manager.evaluate()` |
+| `hybrid_provider.get_forecast_series()` | Reference time for forecast timestamps |
+| `monitor.py._fetch_readings()` | Anchor for time window calculations (since/until) |
+| `monitor.py.layout()` | Initializes date picker's "today" |
+| `main.py.update_clock()` | Computes clock offset for navbar display |
+
+### Multi-Client Timezone
+
+Each client can be on a different DB server in a different timezone. The offset detection
+runs per `client_id` (via the connection pool), so clients on a US/Eastern server see
+Eastern time while clients on a US/Central server see Central time, with no configuration needed.
+
+### Why Not UTC Everywhere?
+
+The `date_added` column is populated by the sensor gateway application (outside our control)
+and uses the server's local timezone. Converting everything to UTC would require either:
+- Modifying the gateway (not possible)
+- Storing a per-client timezone string and doing explicit conversions
+
+Auto-detection avoids both: it works with any timezone and adapts automatically.
+
+---
+
+## 11. Simulator
 
 **File**: `sensor_simulator.py` (488 lines)
 
@@ -532,9 +729,9 @@ self-contained. It tracks active alerts, resolved alerts, dismissed alerts, and 
 
 ---
 
-## 11. Testing Strategy
+## 12. Testing Strategy
 
-### Unit Tests (158 tests, ~1,234 lines)
+### Unit Tests (161 tests, ~1,280 lines)
 
 Every module has dedicated tests:
 
@@ -544,7 +741,7 @@ Every module has dedicated tests:
 | `test_alert_manager.py` | Alert lifecycle | Create, resolve, dismiss, cooldown, note |
 | `test_auth.py` | Cookie HMAC, token resolution | Tampering, expiry, revocation, Unicode |
 | `test_config.py` | Config integrity | Required colour keys, threshold ordering |
-| `test_monitor.py` | All dashboard callbacks | Banner, grid, KPIs, chart, compliance, filters |
+| `test_monitor.py` | All dashboard callbacks | Banner, grid, KPIs, chart, compliance, filters, empty chart |
 | `test_provider.py` | Protocol + factory | Caching, multi-client isolation |
 | `test_routes.py` | Flask middleware | Auth bypass, redirect, healthz |
 | `test_lambda_handler.py` | Lambda entry point | Skipped if `serverless_wsgi` not installed |
@@ -554,10 +751,29 @@ Every module has dedicated tests:
 A deterministic provider with 3 sensors (1 healthy, 1 hot with alert, 1 offline)
 and 2 locations. Used by all monitor tests via `conftest.py` autouse fixture.
 
+### Production Readiness Validated
+
+A deep-dive integration test (run against a live DB, then removed) validated 169 assertions
+across 16 categories:
+- Sensor states (online/offline/degraded, battery, signal, anomaly)
+- Timezone auto-detection (`_detect_tz_offset`, `fetch_db_now`)
+- Time range buttons (live, 1h, 6h, 12h, 24h) and custom date ranges
+- Offline sensor handling (anchoring to `last_seen`, no forecast)
+- Filters (location, MAC, status, reset)
+- Compliance calculations (total-based %, 7-day trend with filled dates)
+- Forecast generation and alerts
+- Alert lifecycle (creation, resolution, dismissal, history, cooldown)
+- KPIs (all values, edge cases)
+- Chart rendering (axis ranges, empty data annotation, downsampling)
+- UI callbacks (banner, status bar, grid, chart, compliance, range bar, alert table)
+- Authentication (cookie creation, verification, expiry, token hints)
+- Timestamp formatting (`_fmt_time` edge cases, no "Z" suffix)
+- Provider caching and DB connection health
+
 ### Running Tests
 
 ```bash
 cd dashboard
-python -m pytest tests/ -v        # all tests
-python -m ruff check app/ tests/  # lint
+python -m pytest tests/ -v        # 161 unit tests
+python -m ruff check app/ tests/  # lint (0 errors)
 ```

@@ -61,6 +61,8 @@ def unified_chart(
     range_mode: str = "live",
     is_offline: bool = False,
     height: int = 360,
+    x_since: str | None = None,
+    x_until: str | None = None,
 ) -> go.Figure:
     if len(readings) > cfg.CHART_DOWNSAMPLE_TARGET:
         readings = _downsample(readings)
@@ -71,9 +73,11 @@ def unified_chart(
 
     f_ts = [f["timestamp"] for f in fc_series]
     all_ts = h_ts + f_ts
-    if all_ts:
+    band_start = x_since or (all_ts[0] if all_ts else None)
+    band_end = x_until or (all_ts[-1] if all_ts else None)
+    if band_start and band_end:
         fig.add_trace(go.Scatter(
-            x=[all_ts[0], all_ts[-1], all_ts[-1], all_ts[0]],
+            x=[band_start, band_end, band_end, band_start],
             y=[cfg.TEMP_LOW, cfg.TEMP_LOW, cfg.TEMP_HIGH, cfg.TEMP_HIGH],
             fill="toself", fillcolor=cfg.COLORS["safe_zone"],
             line=dict(width=0), showlegend=False, hoverinfo="skip",
@@ -129,6 +133,14 @@ def unified_chart(
 
     _add_safe_thresholds(fig)
 
+    if not h_ts and x_since and x_until:
+        fig.add_annotation(
+            text="No readings in this range",
+            xref="paper", yref="paper", x=0.5, y=0.5,
+            showarrow=False,
+            font=dict(size=13, color=cfg.COLORS["text_muted"]),
+        )
+
     if alerts:
         _add_alert_markers(fig, alerts, h_ts, h_t)
 
@@ -138,7 +150,7 @@ def unified_chart(
         elif range_mode == "live" and fc_series:
             _add_marker_line(fig, h_ts[-1], "Now", cfg.COLORS["offline"])
 
-    _apply_layout(fig, height, range_mode, is_offline)
+    _apply_layout(fig, height, range_mode, is_offline, x_since, x_until)
     return fig
 
 
@@ -241,13 +253,17 @@ def _add_marker_line(fig, x, label, color):
     )
 
 
-def _apply_layout(fig, height, range_mode, is_offline):
+def _apply_layout(fig, height, range_mode, is_offline,
+                   x_since=None, x_until=None):
     title = None
     if is_offline:
         title = dict(
             text="Offline — Last Known Data",
             font=dict(size=10, color=cfg.COLORS["offline"]), x=0.5,
         )
+    xaxis = dict(gridcolor=cfg.CHART_GRID_COLOR)
+    if x_since and x_until:
+        xaxis["range"] = [x_since, x_until]
     fig.update_layout(
         template=cfg.CHART_TEMPLATE,
         paper_bgcolor=cfg.CHART_PAPER_BG,
@@ -257,7 +273,7 @@ def _apply_layout(fig, height, range_mode, is_offline):
         margin=dict(l=40, r=50, t=25, b=28),
         hovermode="x unified",
         hoverlabel=cfg.HOVER_LABEL,
-        xaxis=dict(gridcolor=cfg.CHART_GRID_COLOR),
+        xaxis=xaxis,
         yaxis=dict(gridcolor=cfg.CHART_GRID_COLOR, title="°F"),
         legend=dict(
             orientation="h", yanchor="top", y=-0.15,

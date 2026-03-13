@@ -83,7 +83,7 @@ def readings_for_device(bucket: str, prefix: str, device_id: str,
             continue
         ts = row["date_added"]
         out.append({
-            "timestamp": ts.strftime("%Y-%m-%dT%H:%M:%SZ") if hasattr(ts, "strftime") else str(ts),
+            "timestamp": ts.strftime("%Y-%m-%dT%H:%M:%S") if hasattr(ts, "strftime") else str(ts),
             "temperature": temp,
         })
     return out

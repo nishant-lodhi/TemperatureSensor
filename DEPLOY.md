@@ -277,21 +277,22 @@ After starting the dashboard, verify each feature works:
 
 | # | Feature | How to Validate | Expected Result |
 |---|---|---|---|
-| 1 | **Dashboard loads** | Open http://localhost:8051 | Navbar with clock and LIVE indicator |
+| 1 | **Dashboard loads** | Open http://localhost:8051 | Navbar with clock showing "Local" time (auto-detected from DB timezone) |
 | 2 | **Sensor tiles** | Look below the filter bar | Grid of sensor cards showing temp, battery, signal |
 | 3 | **Facility filter** | Click "All Facilities" dropdown | Dropdown with location names from DB |
 | 4 | **Sensor filter** | Select a facility, check sensor dropdown | Only sensors from that facility |
-| 5 | **Sensor selection** | Click a sensor tile | KPIs appear, chart loads |
-| 6 | **Chart — LIVE** | With sensor selected, click LIVE | Line chart with data + forecast |
-| 7 | **Chart — History** | Click 6h or 12h | Historical data, no forecast |
-| 8 | **Date range** | Pick dates in calendar | Chart for selected range |
-| 9 | **Alerts** | Select a sensor with alerts (red tile) | Alert cards below filter bar |
-| 10 | **Note action** | Click "Note" on alert | Green checkmark, alert disappears |
-| 11 | **Remove action** | Click "Remove" on alert | Alert disappears, cooldown starts |
-| 12 | **Status filters** | Click Critical / Warning / Normal | Only matching sensors shown |
-| 13 | **Reset** | Click "Reset" button | All filters cleared |
-| 14 | **Compliance** | Scroll to Live Compliance section | Gauge + stats + 7-day trend |
-| 15 | **Healthz** | `curl http://localhost:8051/healthz` | JSON with mysql and provider status |
+| 5 | **Sensor selection** | Click a sensor tile | KPIs appear (including Battery), chart loads |
+| 6 | **Chart — LIVE** | With sensor selected, click LIVE | Line chart with 2h history + 30-min forecast in 1h forward window |
+| 7 | **Chart — 1h/6h/12h/24h** | Click a time button | X-axis locked to full window even if data is sparse |
+| 8 | **Date range** | Pick dates in calendar | Chart for selected range; empty ranges show "No readings in this range" |
+| 9 | **Same-day date range** | Pick same start and end date | Full 24h (00:00–23:59) of data for that day |
+| 10 | **Alerts** | Select a sensor with alerts (red tile) | Alert cards below filter bar with timestamps in DB local time |
+| 11 | **Note action** | Click "Note" on alert | Green checkmark, alert disappears |
+| 12 | **Remove action** | Click "Remove" on alert | Alert disappears, cooldown starts |
+| 13 | **Status filters** | Click Critical / Warning / Normal | Only matching sensors shown |
+| 14 | **Reset** | Click "Reset" button | All filters cleared, returns to LIVE |
+| 15 | **Compliance** | Scroll to Live Compliance section | Gauge uses total sensors (offline reduces %). 7-day trend with no gaps |
+| 16 | **Healthz** | `curl http://localhost:8051/healthz` | JSON with mysql and provider status |
 
 ---
 
@@ -1087,7 +1088,11 @@ aws cloudformation describe-stacks \
 | **Blank chart on long date range** | Too many data points | Downsampling is automatic (2000 pts); check MySQL query limits |
 | **Location dropdown empty** | `name` column null/empty in DB | Ensure `name` is populated in `dg_gateway_data` |
 | **No sensors after login** | `client_id` mismatch | Verify `CLIENT_ID` matches `customer_key` values in DB |
-| **Compliance shows 0%** | All sensors offline | Expected — shows "Last Known" label |
+| **Compliance shows low %** | Offline sensors counted against total | Expected — offline sensors reduce compliance (2 offline + 1 in-range = 33.3%) |
+| **Sensors show offline but data exists** | Timezone mismatch between `NOW()` and `date_added` | Auto-detected — restart app to re-detect. Check `_detect_tz_offset()` logs |
+| **Navbar clock shows UTC** | DB unreachable on first tick | Auto-retries; if persistent, check DB connectivity |
+| **7-day trend has gaps** | No data for some days | Days with no data show 0% compliance (auto-filled) |
+| **Graph X-axis wrong range** | Old cache | Click Reset or refresh; X-axis is locked to requested window |
 | **`moto` import error** | Wrong version | `pip install 'moto>=5.0'` |
 | **MySQL connection timeout** | Aurora idle pruning | Auto-retry built in; restart app if persistent |
 | **Parquet not found (hybrid)** | S3 path wrong | Falls back to MySQL; check `PARQUET_BUCKET` |

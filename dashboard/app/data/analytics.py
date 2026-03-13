@@ -5,7 +5,7 @@ All functions are stateless: numpy in, dicts out. No DB, no I/O.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 
 import numpy as np
 
@@ -81,7 +81,12 @@ def build_sensor_state(row: dict, hist_rows: list[dict], now: datetime,
         return {}
 
     last_seen = row["date_added"]
-    age_sec = (now - last_seen.replace(tzinfo=timezone.utc)).total_seconds() if isinstance(last_seen, datetime) else 99999
+    if isinstance(last_seen, datetime) and isinstance(now, datetime):
+        ls = last_seen.replace(tzinfo=None) if last_seen.tzinfo else last_seen
+        n = now.replace(tzinfo=None) if now.tzinfo else now
+        age_sec = (n - ls).total_seconds()
+    else:
+        age_sec = 99999
 
     status = compute_sensor_status(
         age_sec, cfg_thresholds["degraded_sec"], cfg_thresholds["offline_sec"],
@@ -116,7 +121,7 @@ def build_sensor_state(row: dict, hist_rows: list[dict], now: datetime,
         except (ValueError, TypeError):
             pass
 
-    last_seen_str = last_seen.replace(tzinfo=timezone.utc).isoformat() if isinstance(last_seen, datetime) else str(last_seen)
+    last_seen_str = last_seen.strftime("%Y-%m-%dT%H:%M:%S") if isinstance(last_seen, datetime) else str(last_seen)
 
     return {
         "device_id": mac, "temperature": round(temp, 2),
@@ -166,7 +171,7 @@ def forecast_series(params: dict, ref_time: datetime, steps: int) -> list[dict]:
     return [
         {
             "step": h,
-            "timestamp": (ref_time + timedelta(minutes=h)).strftime("%Y-%m-%dT%H:%M:00Z"),
+            "timestamp": (ref_time + timedelta(minutes=h)).strftime("%Y-%m-%dT%H:%M:00"),
             "predicted": round(lvl + trend * h, 2),
             "ci_lower": round(lvl + trend * h - 1.96 * std * (h ** 0.5) * 0.1, 2),
             "ci_upper": round(lvl + trend * h + 1.96 * std * (h ** 0.5) * 0.1, 2),

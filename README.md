@@ -40,6 +40,21 @@ The `HybridProvider` manages the routing transparently. Readings are cached for 
 keyed by `(device_id, range)`. Sensor states are cached for 15s. All cache TTLs are
 centralised in `config.py`.
 
+### Timezone Auto-Detection
+
+The database `date_added` column stores timestamps in the DB server's local timezone
+(e.g., US/Eastern for a Florida facility), while `SELECT NOW()` returns UTC. The system
+auto-detects this offset:
+
+1. `mysql_reader._detect_tz_offset()` compares `NOW()` with `MAX(date_added)` to compute the offset (cached 1 hour)
+2. `mysql_reader.fetch_db_now()` returns `NOW() - offset`, aligning the current time with `date_added`'s timezone
+3. All time calculations — sensor age, graph ranges, compliance, forecast — use this aligned time
+4. Timestamps displayed on graphs and alerts are in the data's native timezone (no "Z" suffix)
+5. The navbar live clock auto-detects and shows DB local time (label: "Local")
+
+**Multi-client timezone**: each DB server has its own timezone. `_detect_tz_offset` runs
+per-connection, so clients on different servers automatically see their local time.
+
 ### Database Table — `dg_gateway_data`
 
 | Column | Purpose |
@@ -52,7 +67,7 @@ centralised in `config.py`.
 | `rssi` | Signal strength (dBm) |
 | `power` | Battery level |
 | `tags_id` | Tag identifier (links to legacy `dg_tags` table) |
-| `date_added` | Timestamp of the reading |
+| `date_added` | Timestamp of the reading (in DB server's local timezone) |
 
 The DB column `customer_key` is mapped to `client_id` once in `mysql_reader._client_clause()`.
 All application code uses `client_id` consistently. For shared-DB clients the SQL filter
@@ -62,7 +77,7 @@ All application code uses `client_id` consistently. For shared-DB clients the SQ
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│ ◉ TEMPMONITOR                        Mar 12, 2026  ● LIVE   │
+│ ◉ TEMPMONITOR                   Mar 13, 2026 14:30 Local    │
 ├──────────────────────────────────────────────────────────────┤
 │ [All Facilities]  10/13 Sensors  6 Alerts  77.5°F Avg        │
 ├──────────────────────────────────────────────────────────────┤
@@ -87,11 +102,13 @@ All application code uses `client_id` consistently. For shared-DB clients the SQ
 │  Safe zone shading (65–85°F) | Too Hot / Too Cold thresholds  │
 │  Forecast dotted line with glow + CI band                     │
 │  Alert ◆ diamonds color-coded by severity                     │
+│  X-axis locked to requested time window                       │
+│  "No readings in this range" for empty date ranges            │
 ├──────────────────────────────────────────────────────────────┤
-│ [Compliance Gauge 70%]       │  [7-Day Compliance Trend]      │
-│ Total 13 | In Range 7        │  Line chart with target 95%    │
-│ Issue 3 | Hot 2 | Cold 1     │                                │
-│ Offline 3                    │                                │
+│ [Compliance Gauge 33.3%]   │  [7-Day Compliance Trend]       │
+│ Total 3 | In Range 1       │  8 days filled (0% for gaps)    │
+│ Issue 0 | Hot 0 | Cold 0   │  Line chart with target 95%     │
+│ Offline 2                  │                                 │
 ├──────────────────────────────────────────────────────────────┤
 │ Alert History Table                                           │
 │  Priority | Type | What | When | Status                       │
@@ -113,6 +130,7 @@ All application code uses `client_id` consistently. For shared-DB clients the SQ
 **Date Range Picker**:
 - Calendar-based start/end date selection (max 120 days back)
 - Selecting dates replaces the quick-button range mode with "custom"
+- Same start and end date shows full 24 hours (00:00:00 → 23:59:59)
 
 **Status Filter** (color-coded buttons):
 - **All** — show every sensor
@@ -124,11 +142,11 @@ All application code uses `client_id` consistently. For shared-DB clients the SQ
 
 ### Time Range Modes
 
-| Button | Behavior |
-|---|---|
-| **LIVE** (green pulse) | Auto-refreshes every 15s, shows last 2h + 30-min forecast |
-| **1h / 6h / 12h / 24h** | Single fetch, cached, no auto-refresh for readings |
-| **Date Range Picker** | Custom start/end dates (up to 120 days back), single fetch |
+| Button | X-axis Window | Behavior |
+|---|---|---|
+| **LIVE** (green pulse) | now-2h → now+1h | Auto-refreshes every 15s, shows 30-min forecast in the +1h window |
+| **1h / 6h / 12h / 24h** | now-Nh → now | Single fetch, cached, no auto-refresh for readings. X-axis locked to full window even if data is sparse |
+| **Date Range Picker** | start 00:00 → end 23:59 | Custom start/end dates (up to 120 days back). Empty ranges show chart with "No readings" annotation |
 
 ### Callback Architecture — Split Data Pump
 
@@ -165,9 +183,9 @@ TemperatureSensor/
 ├── requirements-dev.txt          Dev dependencies (pytest, ruff)
 ├── sensor_simulator.py    (488)  Standalone simulator (10 live + 3 offline sensors)
 ├── scripts/
-│   ├── manage_client.py   (213)  Client CRUD via Secrets Manager (add/list/remove/rotate)
-│   ├── onboard_client.sh  (158)  Automated onboarding (Secrets + DynamoDB + registry)
-│   └── setup_server.sh    (155)  Automated server deployment (SAM build + deploy)
+│   ├── manage_client.py   (219)  Client CRUD via Secrets Manager (add/list/remove/rotate)
+│   ├── onboard_client.sh  (208)  Automated onboarding (Secrets + DynamoDB + registry)
+│   └── setup_server.sh    (184)  Automated server deployment (SAM build + deploy)
 ├── infra/
 │   └── template.yaml      (200)  SAM CloudFormation template
 └── dashboard/
@@ -179,20 +197,20 @@ TemperatureSensor/
     │   │                         theme colours, chart defaults, SVG icons
     │   ├── auth.py         (134) Cookie signing, Secrets Manager token resolution
     │   ├── routes.py       (109) Flask middleware, /connect, /disconnect, /healthz
-    │   ├── main.py         (106) Dash app creation, navbar, clock callback
+    │   ├── main.py         (121) Dash app creation, navbar, local-time clock callback
     │   ├── assets/
     │   │   └── style.css   (321) Light theme: cards, filters, animations, calendar
     │   ├── data/
     │   │   ├── provider.py  (38) DataProvider protocol + factory (per-client cache)
-    │   │   ├── client_registry.py (160) Client config loader (clients.yaml + env fallback)
-    │   │   ├── mysql_reader.py (255) Per-client connection pool + all SQL queries
+    │   │   ├── client_registry.py (199) Client config loader (clients.yaml + env fallback)
+    │   │   ├── mysql_reader.py (311) Per-client connection pool, timezone detection, all SQL queries
     │   │   ├── parquet_reader.py (111) S3 daily Parquet with in-memory cache
-    │   │   ├── analytics.py (175) Stats, anomaly detection, forecasting (stateless)
-    │   │   ├── alert_manager.py (250) DynamoDB lifecycle (moto locally)
-    │   │   └── hybrid_provider.py (282) Orchestrator: routing + caching + analytics
+    │   │   ├── analytics.py (180) Stats, anomaly detection, forecasting (stateless)
+    │   │   ├── alert_manager.py (250) DynamoDB lifecycle (moto locally), DB-local timestamps
+    │   │   └── hybrid_provider.py (315) Orchestrator: routing + caching + analytics + date-fill
     │   └── pages/
-    │       ├── charts.py   (348) unified_chart(), compliance_gauge(), compliance_trend()
-    │       └── monitor.py (1098) Single-page: layout, filters, callbacks, all UI
+    │       ├── charts.py   (364) unified_chart(), compliance_gauge(), compliance_trend()
+    │       └── monitor.py (1105) Single-page: layout, filters, callbacks, all UI
     └── tests/
         ├── conftest.py      (44) Flask context + MockProvider fixture
         ├── mock_provider.py (111) Deterministic 3-sensor + 2-location mock
@@ -202,12 +220,12 @@ TemperatureSensor/
             ├── test_auth.py          (249) Cookie HMAC, tokens, expiry, hints
             ├── test_config.py         (35) Theme + threshold validation
             ├── test_lambda_handler.py (49) Lambda handler (skip if no serverless_wsgi)
-            ├── test_monitor.py       (325) All callbacks, filters, compliance, alerts
+            ├── test_monitor.py       (326) All callbacks, filters, compliance, alerts
             ├── test_provider.py       (75) Protocol + factory + mock
             └── test_routes.py         (66) Flask routes + middleware
 ```
 
-Total: **~3,200 lines of application code**, **~1,234 lines of test code**, **161 unit tests**.
+Total: **~3,400 lines of application code**, **~1,280 lines of test code**, **161 unit tests**.
 
 ### Alert System
 
@@ -218,7 +236,7 @@ Total: **~3,200 lines of application code**, **~1,234 lines of test code**, **16
 | **DISMISSED** | Officer clicks "Remove" | `update_item` → DISMISSED | Disappears + 5-min cooldown |
 | **NOTE + DISMISS** | Officer clicks "Note" | Sends context to Lambda X → auto-dismiss | Green checkmark → disappears |
 
-Alert conditions evaluated every 15 seconds:
+Alert conditions evaluated every 15 seconds (timestamps in DB local time):
 
 | Alert Type | Severity | Condition |
 |---|---|---|
@@ -238,9 +256,29 @@ All analytics computed in real-time from raw readings — no pre-aggregation:
 - **Rolling statistics**: 1-hour high, low, average, standard deviation
 - **Rate of change**: temperature delta per 10-minute window
 - **Anomaly detection**: Z-score (> 2.5σ) + hard threshold checks
-- **Sensor status**: online / degraded (> 2 min silent) / offline (> 5 min silent)
-- **Forecasting**: linear regression on recent readings → point forecast + confidence interval series
-- **Compliance**: percentage of readings within safe range (65–85°F), excludes offline sensors
+- **Sensor status**: online / degraded (> 2 min silent) / offline (> 5 min silent); age calculated using timezone-aligned naive datetimes
+- **Forecasting**: linear regression on recent readings → 30-step series (1 min each) + confidence interval
+- **Compliance**: percentage of in-range sensors relative to **total** sensors (offline sensors count against compliance)
+
+### Compliance Section
+
+- **Live Compliance Gauge**: percentage of in-range sensors out of **total** (not just online). If 1 of 3 sensors is in-range and 2 are offline → 33.3%, not 100%
+- **Stats**: Total, In Range, Issue, Too Hot, Too Cold, Offline
+- **7-Day Compliance Trend**: daily compliance over 7 days. Missing dates filled with 0% (no gaps or duplicates). Target line at 95%
+- **Filter-aware**: compliance updates when a facility filter is applied, showing scope label
+
+### Unified Chart
+
+One chart handles all modes — no separate live/offline/history charts:
+
+| Feature | LIVE mode | Quick Range (1h–24h) | Custom Date Range | Offline |
+|---|---|---|---|---|
+| Actual line | Solid, teal | Solid, teal | Solid, teal | Dotted, gray |
+| Forecast | 30-min, dotted orange with glow | Hidden | Hidden | Hidden |
+| Safe zone (65–85°F) | Full window | Full window | Full window | Full window |
+| X-axis range | Locked: now-2h → now+1h | Locked: now-Nh → now | Locked: start → end 23:59 | Locked: last_seen ± range |
+| Empty data handling | N/A | Shows safe zone + "No readings" | Shows safe zone + "No readings" | Shows last known data |
+| Downsampling | No (< 2000 pts) | No | Min-max-mean (> 2000 pts) | No |
 
 ### Multi-Tenancy & Client Registry
 
@@ -295,26 +333,6 @@ Automated via `scripts/setup_server.sh`:
 
 This builds and deploys the full SAM stack (Lambda + API Gateway + DynamoDB + IAM).
 
-### Compliance Section
-
-- **Live Compliance Gauge**: percentage of ONLINE sensors within safe range (65–85°F)
-- **Stats**: Total, In Range, Issue, Too Hot, Too Cold, Offline (offline sensors excluded from temperature stats)
-- **7-Day Compliance Trend**: daily compliance percentage over the past 7 days with target line (95%)
-- **Filter-aware**: compliance updates when a facility filter is applied, showing scope label
-
-### Unified Chart
-
-One chart handles all modes — no separate live/offline/history charts:
-
-| Feature | LIVE mode | Quick Range (1h–24h) | Custom Date Range | Offline |
-|---|---|---|---|---|
-| Actual line | Solid, teal | Solid, teal | Solid, teal | Dotted, gray |
-| Forecast | 30-min, dotted orange with glow | Hidden | Hidden | Hidden |
-| Safe zone (65–85°F) | Shaded | Shaded | Shaded | Shaded |
-| Threshold lines | Too Hot / Too Cold | Too Hot / Too Cold | Too Hot / Too Cold | Too Hot / Too Cold |
-| Alert diamonds | Severity-colored | Severity-colored | Severity-colored | Severity-colored |
-| Downsampling | No (< 2000 pts) | No | Min-max-mean (> 2000 pts) | No |
-
 ## Quick Start (Local)
 
 ```bash
@@ -335,7 +353,7 @@ cd dashboard && gunicorn app.main:server -b 0.0.0.0:8051 --threads 4
 python sensor_simulator.py         # http://localhost:8051
 
 # 5. Test + lint
-cd dashboard && python -m pytest tests/ -v    # 158 unit tests
+cd dashboard && python -m pytest tests/ -v    # 161 unit tests
 cd dashboard && python -m ruff check app/ tests/
 ```
 
@@ -413,7 +431,7 @@ See [DEPLOY.md](DEPLOY.md) for the full deployment guide.
 **Runtime** (`dashboard/requirements.txt`):
 ```
 dash>=2.14, dash-bootstrap-components>=1.5, plotly>=5.18
-pandas>=2.0, numpy>=1.24,<2.1
+pandas>=2.0, numpy>=1.26
 pymysql>=1.1, cryptography>=41.0, pyarrow>=15.0
 boto3>=1.28, serverless-wsgi>=0.2, gunicorn>=21.2, moto>=5.0
 ```

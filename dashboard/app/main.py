@@ -1,13 +1,25 @@
 """TempMonitor Dashboard — app creation, layout, clock."""
+# from dotenv import load_dotenv  # noqa: E402, I001
+# load_dotenv()
 
-import os
+import logging  # noqa: E402
+import os  # noqa: E402
 
-import dash
-import dash_bootstrap_components as dbc
-from dash import Input, Output, dcc, html
+import dash  # noqa: E402
+import dash_bootstrap_components as dbc  # noqa: E402
+from dash import Input, Output, dcc, html  # noqa: E402
 
-from app import config as cfg
-from app.routes import register
+from app import config as cfg  # noqa: E402
+from app.routes import register  # noqa: E402
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(levelname)s %(name)s %(message)s",
+)
+logging.getLogger("botocore").setLevel(logging.WARNING)
+logging.getLogger("urllib3").setLevel(logging.WARNING)
+
+logger = logging.getLogger("tempsensor")
 
 app = dash.Dash(
     __name__, use_pages=True, pages_folder="pages",
@@ -22,6 +34,11 @@ app = dash.Dash(
 
 server = app.server
 register(server)
+
+logger.info("APP_INIT env=%s src=%s aws=%s",
+            os.environ.get("ENVIRONMENT", "local"),
+            os.environ.get("DATA_SOURCE", "mysql"),
+            cfg.AWS_MODE)
 
 _F = "'Inter', 'DM Sans', system-ui, sans-serif"
 
@@ -77,6 +94,9 @@ app.layout = html.Div([
 })
 
 
+_clock_offset = None
+
+
 @app.callback(
     Output("live-clock", "children"),
     Output("client-badge", "children"),
@@ -85,18 +105,30 @@ app.layout = html.Div([
 def update_clock(_):
     """Tick every second — update navbar clock and client badge."""
     from datetime import datetime, timezone
+    global _clock_offset
+    if _clock_offset is None:
+        try:
+            from app.auth import get_client_id
+            from app.data.provider import get_provider
+            prov = get_provider(get_client_id())
+            db_now = prov.get_db_time()
+            if db_now:
+                _clock_offset = db_now - datetime.now(timezone.utc).replace(tzinfo=None)
+        except Exception:
+            pass
+    utc_now = datetime.now(timezone.utc).replace(tzinfo=None)
+    display = utc_now + _clock_offset if _clock_offset else utc_now
+    label = "Local" if _clock_offset else "UTC"
     return (
-        datetime.now(timezone.utc).strftime("%b %d, %Y  %H:%M:%S UTC"),
+        display.strftime(f"%b %d, %Y  %H:%M:%S {label}"),
         "",
     )
 
 
 if __name__ == "__main__":
-    import logging
-    logging.basicConfig(level=logging.INFO)
     try:
         from app.data.mysql_reader import warmup
         warmup()
     except Exception as exc:
-        logging.getLogger(__name__).warning("MySQL warm-up failed: %s", exc)
+        logger.warning("MySQL warm-up failed: %s", exc)
     app.run(debug=False, host="0.0.0.0", port=int(os.environ.get("PORT", "8051")))
