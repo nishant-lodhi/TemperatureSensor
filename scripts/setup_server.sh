@@ -13,11 +13,9 @@
 #     --env prod \
 #     --deployment-id abc1234567 \
 #     --db-host cluster.rds.amazonaws.com \
-#     --db-user app_user \
-#     --db-database county_db \
-#     --region us-east-1 \
-#     [--stack-name TempMonitor-prod] \
-#     [--s3-bucket my-sam-artifacts-bucket]
+#     --db-user app_reader \
+#     --db-database sensor_prod \
+#     --region us-east-1
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -35,10 +33,11 @@ usage() {
   echo ""
   echo "Optional:"
   echo "  --region REGION         AWS region (default: us-east-1)"
-  echo "  --stack-name NAME       CloudFormation stack name (default: TempMonitor-ENV)"
+  echo "  --stack-name NAME       CloudFormation stack name (default: TempSensor-ENV)"
   echo "  --s3-bucket BUCKET      SAM artifact bucket (default: auto-managed)"
   echo "  --data-source SRC       mysql|parquet|hybrid (default: mysql)"
   echo "  --parquet-bucket B      S3 bucket for Parquet data"
+  echo "  --project-prefix PFX    Resource name prefix (default: TempSensor)"
   echo "  --dry-run               Print commands without executing"
   exit 1
 }
@@ -46,7 +45,7 @@ usage() {
 # ── Parse args ───────────────────────────────────────────────────────────────
 ENV="" DEPLOYMENT_ID="" DB_HOST="" DB_USER="" DB_DATABASE=""
 REGION="us-east-1" STACK_NAME="" S3_BUCKET=""
-DATA_SOURCE="mysql" PARQUET_BUCKET="" DRY_RUN=false
+DATA_SOURCE="mysql" PARQUET_BUCKET="" PROJECT_PREFIX="TempSensor" DRY_RUN=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -60,6 +59,7 @@ while [[ $# -gt 0 ]]; do
     --s3-bucket)      S3_BUCKET="$2"; shift 2;;
     --data-source)    DATA_SOURCE="$2"; shift 2;;
     --parquet-bucket) PARQUET_BUCKET="$2"; shift 2;;
+    --project-prefix) PROJECT_PREFIX="$2"; shift 2;;
     --dry-run)        DRY_RUN=true; shift;;
     *) echo -e "${RED}Unknown option: $1${NC}"; usage;;
   esac
@@ -71,11 +71,11 @@ done
 [[ -z "$DB_USER" ]]       && echo -e "${RED}--db-user is required${NC}" && usage
 [[ -z "$DB_DATABASE" ]]   && echo -e "${RED}--db-database is required${NC}" && usage
 
-STACK_NAME="${STACK_NAME:-TempMonitor-${ENV}}"
+STACK_NAME="${STACK_NAME:-${PROJECT_PREFIX}-Dashboard-${ENV}}"
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 echo -e "${GREEN}╔═══════════════════════════════════════════════╗${NC}"
-echo -e "${GREEN}║   TempMonitor — Server Setup                  ║${NC}"
+echo -e "${GREEN}║   TempSensor — Server Setup                   ║${NC}"
 echo -e "${GREEN}╚═══════════════════════════════════════════════╝${NC}"
 echo ""
 echo "  Environment:   $ENV"
@@ -99,7 +99,6 @@ if [[ ${#MISSING[@]} -gt 0 ]]; then
 fi
 echo -e "  ${GREEN}✓ All prerequisites found${NC}"
 
-# Prompt for DB password securely
 if [[ -z "${MYSQL_PASSWORD:-}" ]]; then
   read -rsp "  Enter DB password for $DB_USER@$DB_HOST: " MYSQL_PASSWORD
   echo ""
@@ -129,6 +128,7 @@ DEPLOY_CMD="sam deploy \
   --parameter-overrides \
     Environment=${ENV} \
     DeploymentId=${DEPLOYMENT_ID} \
+    ProjectPrefix=${PROJECT_PREFIX} \
     MysqlHost=${DB_HOST} \
     MysqlUser=${DB_USER} \
     MysqlPassword=\${MYSQL_PASSWORD} \
@@ -176,9 +176,6 @@ echo "     ./scripts/onboard_client.sh \\"
 echo "       --client-id 14 \\"
 echo "       --client-name 'County Jail West' \\"
 echo "       --deployment-id ${DEPLOYMENT_ID} \\"
-echo "       --db-host ${DB_HOST} \\"
-echo "       --db-user ${DB_USER} \\"
-echo "       --db-database ${DB_DATABASE} \\"
 echo "       --region ${REGION}"
 echo ""
 echo "  2. Health check:"

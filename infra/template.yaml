@@ -1,7 +1,7 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
 Description: >
-  TempMonitor — Dashboard stack with hybrid data (MySQL/Parquet),
+  TempSensor — Dashboard stack with hybrid data (MySQL/Parquet),
   DynamoDB alerts, and multi-tenant auth.
 
 # ── Naming Convention ──────────────────────────────────────────────────────
@@ -22,13 +22,16 @@ Parameters:
   ProjectPrefix:
     Type: String
     Default: TempSensor
-    Description: "Prefix for all resource names (no spaces, alphanumeric + hyphens)"
+    Description: "Prefix for all resource names"
   CookieSecret:
     Type: String
     Default: ""
     NoEcho: true
+
+  # ── DB credentials (stored in Secrets Manager, never as Lambda env vars) ──
   MysqlHost:
     Type: String
+    Description: "Aurora/RDS endpoint"
     Default: ""
   MysqlPort:
     Type: String
@@ -43,7 +46,8 @@ Parameters:
     NoEcho: true
   MysqlDatabase:
     Type: String
-    Default: "Demo_aurora"
+    Default: ""
+
   DataSource:
     Type: String
     AllowedValues: ["mysql", "parquet", "hybrid"]
@@ -67,6 +71,7 @@ Conditions:
   GenerateCookieSecret: !Equals [!Ref CookieSecret, ""]
   HasParquetBucket: !Not [!Equals [!Ref ParquetBucket, ""]]
   HasNoteLambda: !Not [!Equals [!Ref NoteLambdaArn, ""]]
+  HasDbCreds: !Not [!Equals [!Ref MysqlHost, ""]]
 
 Globals:
   Function:
@@ -80,6 +85,31 @@ Globals:
         DEPLOYMENT_ID: !Ref DeploymentId
 
 Resources:
+
+  # ── Secrets Manager: DB credentials ──────────────────────────────────────
+  # Created automatically by the stack. Lambda reads this at runtime.
+  # Credentials are passed as NoEcho parameters → never visible in console.
+  DbSecret:
+    Type: AWS::SecretsManager::Secret
+    Condition: HasDbCreds
+    Properties:
+      Name: !Sub "${ProjectPrefix}/${DeploymentId}/${Environment}/db"
+      Description: !Sub "DB credentials for ${ProjectPrefix} ${Environment}"
+      SecretString: !Sub |
+        {
+          "host": "${MysqlHost}",
+          "port": ${MysqlPort},
+          "username": "${MysqlUser}",
+          "password": "${MysqlPassword}",
+          "dbname": "${MysqlDatabase}"
+        }
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectPrefix
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: DeploymentId
+          Value: !Ref DeploymentId
 
   # ── DynamoDB: Alert persistence ─────────────────────────────────────────
   AlertsTable:
@@ -140,11 +170,10 @@ Resources:
         Variables:
           AWS_MODE: "true"
           DATA_SOURCE: !Ref DataSource
-          MYSQL_HOST: !Ref MysqlHost
-          MYSQL_PORT: !Ref MysqlPort
-          MYSQL_USER: !Ref MysqlUser
-          MYSQL_PASSWORD: !Ref MysqlPassword
-          MYSQL_DATABASE: !Ref MysqlDatabase
+          DB_SECRET_ARN: !If
+            - HasDbCreds
+            - !Ref DbSecret
+            - ""
           PARQUET_BUCKET: !Ref ParquetBucket
           PARQUET_PREFIX: !Ref ParquetPrefix
           ALERTS_TABLE: !Ref AlertsTable
@@ -222,6 +251,10 @@ Outputs:
   AlertsTableName:
     Description: "DynamoDB alerts table name"
     Value: !Ref AlertsTable
+  DbSecretArn:
+    Condition: HasDbCreds
+    Description: "Secrets Manager ARN for DB credentials"
+    Value: !Ref DbSecret
   DashboardFunctionName:
     Description: "Dashboard Lambda function name"
     Value: !Ref DashboardFunction

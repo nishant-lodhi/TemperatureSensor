@@ -2,16 +2,12 @@
 
 import os
 
-from dotenv import load_dotenv
+import dash
+import dash_bootstrap_components as dbc
+from dash import Input, Output, dcc, html
 
-load_dotenv()
-
-import dash  # noqa: E402
-import dash_bootstrap_components as dbc  # noqa: E402
-from dash import Input, Output, dcc, html  # noqa: E402
-
-from app import config as cfg  # noqa: E402
-from app.routes import register  # noqa: E402
+from app import config as cfg
+from app.routes import register
 
 app = dash.Dash(
     __name__, use_pages=True, pages_folder="pages",

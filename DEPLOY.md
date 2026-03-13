@@ -41,13 +41,26 @@ A serverless dashboard that monitors temperature sensors in correctional facilit
 | Hosting | AWS Lambda + API Gateway | Serverless — auto-scales, pay-per-use |
 | CI/CD | GitHub Actions | Automatic testing and deployment |
 
-**Environments:**
+**Environments & Multi-Server Production:**
 
-| Environment | Branch/Tag | Purpose | Auto-deploy? | Approval needed? |
+| Target | Branch/Tag | Purpose | Auto-deploy? | Approval? |
 |---|---|---|---|---|
 | `dev` | `develop` branch | Development testing | Yes | No |
 | `staging` | `main` branch | Pre-production validation | Yes | No |
-| `prod` | `v*` tag (e.g., `v1.2.0`) | Production for officers | Yes | Yes (reviewer must approve) |
+| `prod-server1` | `v*` tag | Production — Server 1 (e.g., Region West) | Yes | Yes |
+| `prod-server2` | `v*` tag | Production — Server 2 (e.g., Region East) | Yes | Yes |
+| `prod-serverN` | `v*` tag | Production — Server N (add as needed) | Yes | Yes |
+
+**Key concept**: There is one codebase and one git repo. Each production server is a separate AWS stack (Lambda + API Gateway + DynamoDB) with its own clients. A `v*` tag deploys to **all** prod servers in parallel, each requiring its own approval.
+
+```
+                    ┌──────────────────────────────────────────────┐
+  Same code ───────▶│  prod-server1  (clients 14, 27)             │
+  (one git tag)     │  prod-server2  (client 31)                  │
+                    │  prod-server3  (clients 40, 41, 42)         │
+                    └──────────────────────────────────────────────┘
+                    Each server = its own AWS stack, DB, secrets
+```
 
 ---
 
@@ -414,6 +427,38 @@ Example output: `a1b2c3d4e5`
 
 **Write this ID down.** You will use it throughout the setup.
 
+### How DB Credentials Are Secured (Automatic)
+
+DB credentials are **never** stored as Lambda environment variables or in git. Instead:
+
+1. You put `MysqlHost`, `MysqlUser`, `MysqlDatabase` in `samconfig.toml` (non-secret, committed to git)
+2. `MysqlPassword` is passed at deploy time from GitHub Secrets (never stored in files)
+3. CloudFormation **automatically creates a Secrets Manager secret** with all the credentials as JSON
+4. The Lambda gets only the secret's ARN — it reads the actual credentials from Secrets Manager at startup
+
+```
+samconfig.toml                    GitHub Secret
+(host, user, database)    +     (password)
+         │                           │
+         └──── sam deploy ───────────┘
+                    │
+                    ▼
+         CloudFormation creates:
+         ┌──────────────────────────────────────────┐
+         │  Secrets Manager                          │
+         │  TempSensor/{deployment-id}/{env}/db      │
+         │  {"host":"...", "password":"...", ...}     │
+         └──────────────────────────────────────────┘
+                    │
+                    ▼
+         Lambda env var: DB_SECRET_ARN=arn:aws:...
+         (just a pointer — no credentials)
+```
+
+**No manual Secrets Manager setup needed.** It's all part of the stack.
+
+> **Local development is unchanged**: Your `.env` file with `MYSQL_HOST`, `MYSQL_USER`, etc. still works exactly as before. Secrets Manager is only used when deployed to AWS.
+
 ---
 
 ## Create an IAM User for GitHub Actions (One-Time)
@@ -544,18 +589,18 @@ git checkout main
 
 - `develop` — developers push features here; triggers deploy to **dev**
 - `main` — stable code; triggers deploy to **staging**
-- `v*` tags (e.g., `v1.0.0`) — triggers deploy to **prod** (with approval)
+- `v*` tags (e.g., `v1.0.0`) — triggers deploy to **all prod servers** (with approval per server)
 
 ### Step 3: Create GitHub Environments
 
-Environments let you control which secrets and approvals are needed per deployment.
+Each deployment target needs its own GitHub Environment. This controls which secrets and approvals apply.
 
 1. Go to your repository on GitHub
 2. Click **Settings** (tab at the top)
 3. In the left sidebar, click **Environments**
 4. Click **New environment**
 
-Create these three environments:
+Create these environments:
 
 **Environment: `dev`**
 - Name: `dev`
@@ -567,15 +612,23 @@ Create these three environments:
 - No protection rules needed
 - Click **Configure environment**
 
-**Environment: `prod`**
-- Name: `prod`
+**Environment: `prod-server1`**
+- Name: `prod-server1`
 - Check **Required reviewers** → add yourself or your team lead
 - This means production deploys will WAIT for a human to click "Approve" before running
 - Click **Configure environment**
 
+**Adding more production servers later:**
+
+When you add a new production server (e.g., `prod-server2`):
+1. Create a GitHub Environment named `prod-server2` (with Required reviewers)
+2. Add the same secrets to it (or use repo-level secrets)
+3. Add a `[prod-server2.deploy.parameters]` section in `samconfig.toml`
+4. Add `"prod-server2"` to the targets list in `cd.yml` (both the `workflow_dispatch` options and the `refs/tags/v*` targets array)
+
 ### Step 4: Add Secrets to Each Environment
 
-For each environment (`dev`, `staging`, `prod`), add these secrets:
+For each environment (`dev`, `staging`, `prod-server1`, etc.), add these secrets:
 
 1. Go to **Settings** → **Environments** → click the environment name
 2. Under **Environment secrets**, click **Add secret**
@@ -584,10 +637,12 @@ For each environment (`dev`, `staging`, `prod`), add these secrets:
 |---|---|---|
 | `AWS_ACCESS_KEY_ID` | `AKIAIOSFODNN7EXAMPLE` | From IAM User Step 2 above |
 | `AWS_SECRET_ACCESS_KEY` | `wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY` | From IAM User Step 2 above |
-| `MYSQL_PASSWORD` | Your database password for that environment | Your database admin |
-| `COOKIE_SECRET` | A random string for signing cookies (optional — auto-generated if empty) | `python3 -c "import secrets; print(secrets.token_hex(32))"` |
+| `MYSQL_PASSWORD` | Database password for this environment | Your database admin |
+| `COOKIE_SECRET` | Random string for signing cookies (optional — auto-generated if empty) | `python3 -c "import secrets; print(secrets.token_hex(32))"` |
 
-> **Tip**: If all environments use the **same** AWS account, you can add `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` as **repository-level** secrets (Settings → Secrets and variables → Actions → New repository secret) instead of repeating them per environment. Only `MYSQL_PASSWORD` typically differs per environment.
+> **How it works**: `MysqlPassword` is passed to SAM at deploy time. CloudFormation creates a Secrets Manager secret automatically. The password never appears as a Lambda environment variable — Lambda reads it from Secrets Manager at runtime.
+
+> **Tip**: If all environments share the **same** AWS account, add `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` as **repository-level** secrets instead of repeating per environment. Only `MYSQL_PASSWORD` differs per environment/server.
 
 ### Step 5: Add Environment Variables
 
@@ -615,36 +670,35 @@ nano infra/samconfig.toml
 
 ### What to Change
 
-For each environment section (`[dev.deploy.parameters]`, `[staging.deploy.parameters]`, `[prod.deploy.parameters]`), update:
+For each target section, update:
 
-1. **`DeploymentId`** — Replace `REPLACE_ME1`, `REPLACE_ME2`, `REPLACE_ME3` with actual deployment IDs (generate with `python3 -c "import uuid; print(uuid.uuid4().hex[:10])"`)
-2. **`MysqlHost`** — Your Aurora/RDS endpoint for that environment
-3. **`MysqlUser`** — Database username
+1. **`DeploymentId`** — Replace `REPLACE_ME1`, `REPLACE_ME2`, etc. with actual 10-char IDs (generate with `python3 -c "import uuid; print(uuid.uuid4().hex[:10])"`)
+2. **`MysqlHost`** — Your Aurora/RDS endpoint for that server
+3. **`MysqlUser`** — DB username
 4. **`MysqlDatabase`** — Database name
 5. **`region`** — AWS region
 
 **Example (filled in):**
 
 ```toml
-[dev.deploy.parameters]
-stack_name         = "TempSensor-Dashboard-dev"
+[prod-server1.deploy.parameters]
+stack_name         = "TempSensor-Dashboard-prod-server1"
 resolve_s3         = true
 capabilities       = "CAPABILITY_IAM"
-confirm_changeset  = false
+confirm_changeset  = true
 region             = "us-east-1"
 parameter_overrides = """
-  Environment=dev
+  Environment=prod
   DeploymentId=f8c3a91b02
   ProjectPrefix=TempSensor
   DataSource=mysql
-  MysqlHost=dev-aurora.cluster-ro.us-east-1.rds.amazonaws.com
-  MysqlPort=3306
+  MysqlHost=prod-aurora.cluster-ro.us-east-1.rds.amazonaws.com
   MysqlUser=app_reader
-  MysqlDatabase=sensor_dev
+  MysqlDatabase=sensor_prod
 """
 ```
 
-> **MysqlPassword is NOT in this file.** It is passed securely from GitHub Secrets at deploy time. Never put passwords in files committed to git.
+> **MysqlPassword is NOT in this file.** It is stored as a GitHub Secret and passed securely at deploy time. CloudFormation then creates a Secrets Manager secret with the full credentials automatically.
 
 ### Commit the Config
 
@@ -728,45 +782,52 @@ This workflow deploys your code to AWS after it is merged.
 
 ### Automatic Triggers
 
-| Trigger | Target Environment | Approval Needed? |
+| Trigger | Target(s) | Approval Needed? |
 |---|---|---|
-| Push to `develop` branch | `dev` | No |
-| Push to `main` branch | `staging` | No |
-| Create a `v*` tag (e.g., `v1.2.0`) | `prod` | **Yes** (reviewer must approve) |
+| Push to `develop` branch | `dev` (1 stack) | No |
+| Push to `main` branch | `staging` (1 stack) | No |
+| Create a `v*` tag (e.g., `v1.2.0`) | **All prod servers** (parallel) | **Yes** (per server) |
 
-### Manual Trigger
+### Manual Trigger (Single Target)
 
-You can also trigger a deployment manually:
+You can also deploy to a specific target manually:
 
 1. Go to **Actions** tab on GitHub
 2. Click **"CD — Deploy"** in the left sidebar
 3. Click **"Run workflow"**
-4. Select the target environment from the dropdown
+4. Select the target from the dropdown (e.g., `prod-server1`)
 5. Click **"Run workflow"** (green button)
+
+This is useful for:
+- Deploying a hotfix to one specific server
+- Re-deploying a server after config changes
+- Testing a deploy without tagging a release
 
 ### What It Does (Step by Step)
 
 ```
-1. Determines target environment (dev/staging/prod)
-2. Runs CI safety gate:
+1. Resolves targets:
+   - develop push    → ["dev"]
+   - main push       → ["staging"]
+   - v* tag          → ["prod-server1", "prod-server2", …]  (all prod servers)
+   - manual          → ["<selected target>"]
+
+2. Runs CI safety gate (once):
    a. ruff check      — lint (code style)
    b. pytest           — 161 unit tests
-3. Authenticates to AWS using access keys (from GitHub Secrets)
-4. Installs SAM CLI
-5. Runs "sam build"   — packages the dashboard code into a Lambda ZIP
-6. Runs "sam deploy"  — creates/updates AWS resources:
-   - Lambda function  (the dashboard app)
-   - API Gateway      (the public URL)
-   - DynamoDB table   (alert persistence)
-   - CloudWatch alarm (error monitoring)
-7. Prints the deployed dashboard URL in the workflow summary
+
+3. For EACH target (parallel):
+   a. Authenticates to AWS using access keys (from that target's GitHub Environment secrets)
+   b. Runs "sam build"
+   c. Runs "sam deploy" using that target's section in samconfig.toml
+   d. Prints the deployed dashboard URL
 ```
 
-> **Note:** `sam validate` runs in the CI pipeline (on PRs). The CD pipeline trusts that code merged to `develop`/`main` already passed CI, so it skips re-validation and goes straight to build + deploy.
+> **Note:** `sam validate` runs in the CI pipeline (on PRs). The CD pipeline trusts that code merged to `develop`/`main` already passed CI.
 
-### Deploying to Production
+### Deploying to Production (All Servers)
 
-Production deploys require manual approval:
+Production deploys go to all servers simultaneously, each requiring its own approval:
 
 1. Create a version tag:
    ```bash
@@ -778,26 +839,28 @@ Production deploys require manual approval:
 
 2. Go to **Actions** tab — you will see the CD workflow started
 
-3. It will pause at the deploy step and show: **"Waiting for review"**
+3. You will see one deploy job per production server, each paused at **"Waiting for review"**
 
-4. Click **"Review deployments"** → check **prod** → click **"Approve and deploy"**
+4. For each server, click **"Review deployments"** → check the server → click **"Approve and deploy"**
+   - You can approve all at once or stagger them (e.g., approve server1 first, validate, then approve server2)
 
-5. The deployment proceeds and the URL is printed in the workflow summary
+5. Each server's dashboard URL is printed in the workflow summary
 
 ### Viewing Deployment Results
 
 After deployment completes:
 
 1. Go to **Actions** → click the CD workflow run
-2. Open the **"Deploy to [env]"** job
-3. Open the **"Print deployed URL"** step
+2. You will see one job per target: **"Deploy → dev"**, **"Deploy → prod-server1"**, etc.
+3. Open a job → open **"Print deployed URL"** step
 4. The dashboard URL is printed there
 
 Or from your terminal:
 
 ```bash
+# Replace with the actual stack name from samconfig.toml
 aws cloudformation describe-stacks \
-  --stack-name TempSensor-Dashboard-dev \
+  --stack-name TempSensor-Dashboard-prod-server1 \
   --query 'Stacks[0].Outputs[?OutputKey==`DashboardUrl`].OutputValue' \
   --output text
 ```
@@ -846,10 +909,14 @@ Developer writes code
   └────────┬────────┘
            │
            ▼
-  ┌─────────────────┐
-  │ Create tag       │ ──────────► CD deploys to PROD
-  │ v1.0.0           │             (waits for approval)
-  └─────────────────┘
+  ┌─────────────────┐            ┌──────────────────────────────┐
+  │ Create tag       │ ──────────►│ CD deploys to ALL prod       │
+  │ v1.0.0           │            │ servers (parallel)           │
+  └─────────────────┘            │                              │
+                                  │  prod-server1 ──► [Approve?] │
+                                  │  prod-server2 ──► [Approve?] │
+                                  │  prod-server3 ──► [Approve?] │
+                                  └──────────────────────────────┘
 ```
 
 ### Day-to-Day Workflow for a Developer
@@ -861,7 +928,7 @@ Developer writes code
 5. **CI runs**: wait for green checkmark
 6. **Merge**: click "Merge pull request" → code deploys to **dev** automatically
 7. **Promote to staging**: PR from `develop` → `main`, merge → deploys to **staging**
-8. **Release to prod**: `git tag v1.0.0 && git push origin v1.0.0` → reviewer approves → deploys to **prod**
+8. **Release to prod**: `git tag v1.0.0 && git push origin v1.0.0` → approve each server → deploys to **all prod servers**
 
 ---
 
@@ -989,8 +1056,9 @@ When you deploy, SAM creates these AWS resources:
 | **Lambda** | `TempSensor-Dashboard-{id}-{env}` | Hosts the dashboard (512MB, 30s timeout) | ~$2–5/month |
 | **HTTP API Gateway** | auto-generated | Routes HTTP traffic to Lambda | ~$3–5/month |
 | **DynamoDB Table** | `TempSensor-Alerts-{id}-{env}` | Alert persistence (pay-per-request) | ~$1–3/month |
+| **Secrets Manager (DB)** | `TempSensor/{id}/{env}/db` | DB credentials (auto-created by stack) | ~$0.40/month |
+| **Secrets Manager (Auth)** | `TempSensor/{id}/{client_id}` (per client) | Access tokens for officers | ~$0.40/secret/month |
 | **CloudWatch Alarm** | `TempSensor-Dashboard-Errors-{id}-{env}` | Alerts on Lambda errors | < $1/month |
-| **Secrets Manager** | `TempSensor/{id}/{client_id}` (per client) | Access tokens for officers | ~$0.40/secret/month |
 
 **DynamoDB Table Schema:**
 - Partition key: `PK` (e.g., `ALERT#device_id#alert_type`)
@@ -1022,8 +1090,7 @@ git checkout v1.0.0
 sam build --template-file infra/template.yaml
 sam deploy \
   --config-env prod \
-  --config-file infra/samconfig.toml \
-  --parameter-overrides "MysqlPassword=$MYSQL_PASSWORD"
+  --config-file infra/samconfig.toml
 ```
 
 ### Emergency: Revert Lambda to Previous Version
@@ -1087,13 +1154,13 @@ sam deploy \
   --parameter-overrides "MysqlPassword=YOUR_DB_PASSWORD"
 ```
 
-Replace `dev` with `staging` or `prod` as needed. Replace `YOUR_DB_PASSWORD` with the actual database password for that environment.
+Replace `dev` with `staging`, `prod-server1`, etc. as needed.
 
 **What happens during deploy:**
 1. SAM uploads the Lambda package to S3
 2. Creates/updates a CloudFormation stack
-3. Creates or updates: Lambda function, API Gateway, DynamoDB table, CloudWatch alarm
-4. Prints the outputs (dashboard URL, table name, etc.)
+3. Creates: Lambda, API Gateway, DynamoDB table, Secrets Manager secret (DB creds), CloudWatch alarm
+4. Prints the outputs (dashboard URL, table name, secret ARN, etc.)
 
 ### Step 4: Verify the Deployment
 

@@ -1,35 +1,37 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# SAM Deploy Configuration — one section per environment
+# SAM Deploy Configuration — one section per deployment target
 #
-# Usage:
-#   sam deploy --config-env dev     --config-file infra/samconfig.toml --parameter-overrides "MysqlPassword=xxx"
-#   sam deploy --config-env staging --config-file infra/samconfig.toml --parameter-overrides "MysqlPassword=xxx"
-#   sam deploy --config-env prod    --config-file infra/samconfig.toml --parameter-overrides "MysqlPassword=xxx"
+# Structure:
+#   dev              → 1 dev stack
+#   staging          → 1 staging stack
+#   prod-server1     → Production server 1 (e.g., Region West — clients 14, 27)
+#   prod-server2     → Production server 2 (uncomment when needed)
 #
-# MysqlPassword is NEVER stored in this file — always passed at deploy time.
+# DB password is passed securely via --parameter-overrides at deploy time.
+# CloudFormation auto-creates a Secrets Manager secret from these params.
+# Lambda reads the secret at runtime — credentials never appear as env vars.
 # ─────────────────────────────────────────────────────────────────────────────
 
 version = 0.1
 
-# ── DEV environment ─────────────────────────────────────────────────────────
+# ── DEV ─────────────────────────────────────────────────────────────────────
 [dev.deploy.parameters]
 stack_name         = "TempSensor-Dashboard-dev"
 resolve_s3         = true
-capabilities       = "CAPABILITY_IAM CAPABILITY_NAMED_IAM"
+capabilities       = "CAPABILITY_IAM"
 confirm_changeset  = false
 region             = "us-west-2"
 parameter_overrides = """
   Environment=dev
-  DeploymentId=bd85d9b5e9
+  DeploymentId=REPLACE_ME1
   ProjectPrefix=TempSensor
   DataSource=mysql
   MysqlHost=demo-new-db-cluster.cluster-ro-cyxsij4cwahs.us-east-1.rds.amazonaws.com
-  MysqlPort=3306
   MysqlUser=Demo_aurora
   MysqlDatabase=Demo_aurora
 """
 
-# # ── STAGING environment ─────────────────────────────────────────────────────
+# # ── STAGING ─────────────────────────────────────────────────────────────────
 # [staging.deploy.parameters]
 # stack_name         = "TempSensor-Dashboard-staging"
 # resolve_s3         = true
@@ -42,27 +44,40 @@ parameter_overrides = """
 #   ProjectPrefix=TempSensor
 #   DataSource=mysql
 #   MysqlHost=staging-aurora.cluster-ro.us-east-1.rds.amazonaws.com
-#   MysqlPort=3306
 #   MysqlUser=app_reader
 #   MysqlDatabase=sensor_staging
 # """
 
-# # ── PROD environment ────────────────────────────────────────────────────────
-# [prod.deploy.parameters]
-# stack_name         = "TempSensor-Dashboard-prod"
+# # ── PROD SERVER 1  (example: Region West — clients 14, 27) ─────────────────
+# [prod-server1.deploy.parameters]
+# stack_name         = "TempSensor-Dashboard-prod-server1"
 # resolve_s3         = true
 # capabilities       = "CAPABILITY_IAM"
 # confirm_changeset  = true
 # region             = "us-east-1"
 # parameter_overrides = """
 #   Environment=prod
-#   DeploymentId=REPLACE_ME3
+#   DeploymentId=REPLACE_WITH_ID
 #   ProjectPrefix=TempSensor
-#   DataSource=hybrid
+#   DataSource=mysql
 #   MysqlHost=prod-aurora.cluster-ro.us-east-1.rds.amazonaws.com
-#   MysqlPort=3306
 #   MysqlUser=app_reader
 #   MysqlDatabase=sensor_prod
-#   ParquetBucket=my-sensor-parquet-bucket
-#   ParquetPrefix=sensor-data/
+# """
+
+# ── PROD SERVER 2  (uncomment when adding a second server) ──────────────────
+# [prod-server2.deploy.parameters]
+# stack_name         = "TempSensor-Dashboard-prod-server2"
+# resolve_s3         = true
+# capabilities       = "CAPABILITY_IAM"
+# confirm_changeset  = true
+# region             = "us-east-1"
+# parameter_overrides = """
+#   Environment=prod
+#   DeploymentId=REPLACE_WITH_ID
+#   ProjectPrefix=TempSensor
+#   DataSource=mysql
+#   MysqlHost=east-aurora.cluster-ro.us-east-1.rds.amazonaws.com
+#   MysqlUser=app_reader
+#   MysqlDatabase=sensor_east
 # """

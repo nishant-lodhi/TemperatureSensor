@@ -1,19 +1,63 @@
 """Dashboard configuration — env vars, theme, thresholds, chart defaults."""
 
 import base64
+import json
+import logging
 import os
 
+_logger = logging.getLogger(__name__)
+
 AWS_MODE = os.environ.get("AWS_MODE", "false").lower() == "true"
-AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
+AWS_REGION = os.environ.get("AWS_REGION", "us-west-1")
 ENVIRONMENT = os.environ.get("ENVIRONMENT", "dev")
 PROJECT_PREFIX = os.environ.get("PROJECT_PREFIX", "TempSensor")
 
 DATA_SOURCE = os.environ.get("DATA_SOURCE", "mysql")
-MYSQL_HOST = os.environ.get("MYSQL_HOST", "localhost")
-MYSQL_PORT = int(os.environ.get("MYSQL_PORT", "3306"))
-MYSQL_USER = os.environ.get("MYSQL_USER", "root")
-MYSQL_PASSWORD = os.environ.get("MYSQL_PASSWORD", "")
-MYSQL_DATABASE = os.environ.get("MYSQL_DATABASE", "Demo_aurora")
+
+# ── DB credentials ────────────────────────────────────────────────────────
+# In AWS mode: loaded from Secrets Manager (DB_SECRET_ARN env var).
+# Locally:     loaded from .env / shell env vars (MYSQL_HOST, etc.).
+_db_secret_cache: dict | None = None
+
+
+def _load_db_secret() -> dict:
+    """Fetch DB credentials from Secrets Manager (cached for process lifetime)."""
+    global _db_secret_cache
+    if _db_secret_cache is not None:
+        return _db_secret_cache
+
+    arn = os.environ.get("DB_SECRET_ARN", "")
+    if not arn:
+        _db_secret_cache = {}
+        return _db_secret_cache
+
+    try:
+        import boto3
+        sm = boto3.client("secretsmanager", region_name=AWS_REGION)
+        resp = sm.get_secret_value(SecretId=arn)
+        _db_secret_cache = json.loads(resp["SecretString"])
+        _logger.info("Loaded DB credentials from Secrets Manager")
+    except Exception as exc:
+        _logger.warning("Failed to load DB secret (%s), falling back to env vars: %s", arn, exc)
+        _db_secret_cache = {}
+
+    return _db_secret_cache
+
+
+def _db(key: str, env_var: str, default: str = "") -> str:
+    """Resolve a DB config value: Secrets Manager first, then env var."""
+    if AWS_MODE:
+        secret = _load_db_secret()
+        if secret.get(key):
+            return str(secret[key])
+    return os.environ.get(env_var, default)
+
+
+MYSQL_HOST = _db("host", "MYSQL_HOST", "localhost")
+MYSQL_PORT = int(_db("port", "MYSQL_PORT", "3306"))
+MYSQL_USER = _db("username", "MYSQL_USER", "root")
+MYSQL_PASSWORD = _db("password", "MYSQL_PASSWORD", "")
+MYSQL_DATABASE = _db("dbname", "MYSQL_DATABASE", "Demo_aurora")
 
 PARQUET_BUCKET = os.environ.get("PARQUET_BUCKET", "")
 PARQUET_PREFIX = os.environ.get("PARQUET_PREFIX", "sensor-data/")

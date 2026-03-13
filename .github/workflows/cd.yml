@@ -1,13 +1,18 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # CD — Continuous Deployment
 #
-# Automatically deploys to the correct AWS environment:
-#   • Push to "develop" branch → deploys to DEV
-#   • Push to "main" branch   → deploys to STAGING
-#   • Git tag "v*"             → deploys to PROD (requires manual approval)
-#   • Manual trigger           → deploys to whichever environment you pick
+# Deploys to the correct target(s) based on trigger:
+#   • Push to "develop"  → deploys to DEV (1 stack)
+#   • Push to "main"     → deploys to STAGING (1 stack)
+#   • Git tag "v*"       → deploys to ALL prod servers (parallel, each needs approval)
+#   • Manual trigger     → deploys to whichever target you pick
 #
-# Auth: Uses AWS Access Keys stored as GitHub Secrets.
+# Multi-server production:
+#   Each prod server is a separate GitHub Environment (prod-server1, prod-server2, …)
+#   with its own approval gate and secrets. A v* tag deploys to all of them.
+#   samconfig.toml has one section per server with its own DeploymentId + DbSecretArn.
+#
+# Auth: AWS Access Keys stored as GitHub Secrets (per environment).
 # ─────────────────────────────────────────────────────────────────────────────
 
 name: CD — Deploy
@@ -18,21 +23,24 @@ on:
     tags: ["v*"]
   workflow_dispatch:
     inputs:
-      environment:
-        description: "Target environment"
+      target:
+        description: "Deploy target (server)"
         required: true
         type: choice
         options:
           - dev
           - staging
-          - prod
+          - prod-server1
+          # Add more prod servers here as you onboard them:
+          # - prod-server2
+          # - prod-server3
 
 concurrency:
   group: deploy-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  # ── Step 1: Run the CI checks first ──────────────────────────────────────
+  # ── CI safety gate (runs once) ───────────────────────────────────────────
   ci-gate:
     name: CI Gate (lint + test)
     runs-on: ubuntu-latest
@@ -58,13 +66,42 @@ jobs:
       - name: Test
         run: python -m pytest tests/ -v --tb=short
 
-  # ── Step 2: Deploy to AWS ────────────────────────────────────────────────
+  # ── Determine which targets to deploy to ─────────────────────────────────
+  resolve-targets:
+    name: Resolve deploy targets
+    runs-on: ubuntu-latest
+    outputs:
+      targets: ${{ steps.pick.outputs.targets }}
+    steps:
+      - id: pick
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            # Manual: deploy to the single selected target
+            echo 'targets=["${{ github.event.inputs.target }}"]' >> "$GITHUB_OUTPUT"
+
+          elif [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            # Tag: deploy to ALL production servers (parallel)
+            # ── Add new prod servers to this list ──
+            echo 'targets=["prod-server1"]' >> "$GITHUB_OUTPUT"
+
+          elif [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            echo 'targets=["staging"]' >> "$GITHUB_OUTPUT"
+
+          else
+            echo 'targets=["dev"]' >> "$GITHUB_OUTPUT"
+          fi
+
+  # ── Deploy (runs once per target, parallel for multi-server prod) ────────
   deploy:
-    name: Deploy to ${{ needs.set-env.outputs.environment }}
-    needs: [ci-gate, set-env]
+    name: Deploy → ${{ matrix.target }}
+    needs: [ci-gate, resolve-targets]
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    environment: ${{ needs.set-env.outputs.environment }}
+    environment: ${{ matrix.target }}
+    strategy:
+      matrix:
+        target: ${{ fromJson(needs.resolve-targets.outputs.targets) }}
+      fail-fast: false
 
     steps:
       - name: Checkout code
@@ -90,10 +127,10 @@ jobs:
       - name: SAM build
         run: sam build --template-file infra/template.yaml
 
-      - name: SAM deploy
+      - name: SAM deploy to ${{ matrix.target }}
         run: |
           sam deploy \
-            --config-env ${{ needs.set-env.outputs.environment }} \
+            --config-env ${{ matrix.target }} \
             --config-file infra/samconfig.toml \
             --parameter-overrides \
               "MysqlPassword=${{ secrets.MYSQL_PASSWORD }}" \
@@ -103,29 +140,10 @@ jobs:
 
       - name: Print deployed URL
         run: |
-          STACK=${{ vars.STACK_NAME || format('{0}-Dashboard-{1}', vars.PROJECT_PREFIX || 'TempSensor', needs.set-env.outputs.environment) }}
+          STACK=$(grep -A1 '^\[${{ matrix.target }}.deploy.parameters\]' infra/samconfig.toml \
+            | grep stack_name | sed 's/.*= *"\(.*\)"/\1/')
           URL=$(aws cloudformation describe-stacks \
             --stack-name "$STACK" \
             --query 'Stacks[0].Outputs[?OutputKey==`DashboardUrl`].OutputValue' \
             --output text 2>/dev/null || echo "N/A")
-          echo "### Deployed Dashboard URL" >> $GITHUB_STEP_SUMMARY
-          echo "$URL" >> $GITHUB_STEP_SUMMARY
-
-  # ── Helper: Determine which environment to deploy to ─────────────────────
-  set-env:
-    name: Determine environment
-    runs-on: ubuntu-latest
-    outputs:
-      environment: ${{ steps.pick.outputs.env }}
-    steps:
-      - id: pick
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "env=${{ github.event.inputs.environment }}" >> "$GITHUB_OUTPUT"
-          elif [[ "${{ github.ref }}" == refs/tags/v* ]]; then
-            echo "env=prod" >> "$GITHUB_OUTPUT"
-          elif [ "${{ github.ref }}" = "refs/heads/main" ]; then
-            echo "env=staging" >> "$GITHUB_OUTPUT"
-          else
-            echo "env=dev" >> "$GITHUB_OUTPUT"
-          fi
+          echo "### ${{ matrix.target }} → $URL" >> $GITHUB_STEP_SUMMARY
