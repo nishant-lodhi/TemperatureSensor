@@ -75,7 +75,6 @@ Conditions:
 
 Globals:
   Function:
-    Runtime: python3.14
     Architectures: [x86_64]
     MemorySize: 256
     Timeout: 60
@@ -157,13 +156,14 @@ Resources:
         Environment: !Ref Environment
         DeploymentId: !Ref DeploymentId
 
-  # ── Dashboard Lambda ────────────────────────────────────────────────────
+  # ── Dashboard Lambda (Container Image — bypasses 250 MB ZIP limit) ───
   DashboardFunction:
     Type: AWS::Serverless::Function
     Properties:
       FunctionName: !Sub "${ProjectPrefix}-Dashboard-${DeploymentId}-${Environment}"
-      Handler: lambda_handler.handler
-      CodeUri: ../dashboard/
+      PackageType: Image
+      ImageConfig:
+        Command: ["lambda_handler.handler"]
       MemorySize: 512
       Timeout: 30
       Environment:
@@ -225,6 +225,10 @@ Resources:
             ApiId: !Ref DashboardApi
             Path: /
             Method: ANY
+    Metadata:
+      DockerTag: !Sub "${Environment}-latest"
+      DockerContext: ../dashboard
+      Dockerfile: Dockerfile.lambda
 
   # ── CloudWatch Alarm ────────────────────────────────────────────────────
   DashboardErrorAlarm:

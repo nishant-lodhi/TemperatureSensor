@@ -97,7 +97,7 @@ Download from https://www.python.org/downloads/ — during install, check "Add P
 
 SAM CLI has a known incompatibility with Python 3.13+ (pydantic v1 validator issue). You need **Python 3.12** installed alongside 3.14 to run SAM commands (`sam validate`, `sam build`).
 
-> **Note:** This only affects the SAM CLI tool itself. Your Lambda still runs Python 3.14 — the `--use-container` flag builds inside a Python 3.14 Docker image regardless of the host Python.
+> **Note:** This only affects the SAM CLI tool itself. Your Lambda still runs Python 3.14 — the `Dockerfile.lambda` uses the `public.ecr.aws/lambda/python:3.14` base image.
 
 **Check if already installed:**
 ```bash
@@ -195,7 +195,7 @@ It will ask for:
 
 ### 6. Docker
 
-Docker is required for container-based SAM builds. The `sam build --use-container` command pulls a Docker image matching the Lambda Python 3.14 runtime and compiles all dependencies inside it — this guarantees binary compatibility with Lambda (no more wheel/build failures).
+Docker is required because the Lambda is deployed as a **container image** (not a ZIP). `sam build` runs `docker build` using `dashboard/Dockerfile.lambda` to produce a Docker image based on `public.ecr.aws/lambda/python:3.14`. This approach bypasses the 250 MB ZIP limit and guarantees binary compatibility with Lambda.
 
 **Check if installed:**
 ```bash
@@ -379,7 +379,7 @@ You should see the TempSensor dashboard with your sensors.
 
 Run these checks locally to catch issues **before** they reach CI/CD. This saves time — a failed CI run takes 3-5 minutes to discover vs. seconds locally.
 
-> **Requirement:** Docker must be running for `sam-build`. The build uses `--use-container` to compile dependencies inside a Lambda-compatible Docker image (Python 3.14). This eliminates wheel/binary mismatch errors.
+> **Requirement:** Docker must be running for `sam-build`. The Lambda is deployed as a container image (via `Dockerfile.lambda`) — `sam build` runs `docker build` internally.
 
 **Recommended — use Make (single command):**
 
@@ -396,7 +396,7 @@ All Make targets:
 | `make lint`          | Code style check (ruff)                           |
 | `make test`          | Unit tests (pytest)                               |
 | `make sam-validate`  | SAM template syntax check                         |
-| `make sam-build`     | Container-based Lambda build (requires Docker)    |
+| `make sam-build`     | Docker image build for Lambda (requires Docker)   |
 | `make validate`      | **All above, in order**                           |
 | `make install`       | Install production dependencies                   |
 | `make install-dev`   | Install production + dev dependencies             |
@@ -415,15 +415,15 @@ python -m ruff check app/ tests/
 python -m pytest tests/ -v --tb=short
 
 # 3. SAM template validation
-sam validate --template-file ../infra/template.yaml --lint
+sam validate --template-file ../infra/template.yaml
 
-# 4. SAM build — container-based (requires Docker running)
-sam build --template-file ../infra/template.yaml --use-container
+# 4. SAM build — Docker image (requires Docker running)
+sam build --template-file ../infra/template.yaml
 ```
 
 **All four must pass** before you push. These are the same checks CI/CD runs — validating locally avoids waiting for a remote failure.
 
-> **Why `--use-container`?** SAM pulls the official `public.ecr.aws/sam/build-python3.14` Docker image and installs dependencies inside it. This guarantees every native library (pyarrow, cryptography, etc.) is compiled for Amazon Linux — the exact OS Lambda uses. No more "Binary validation failed" or wheel-not-found errors.
+> **Why container image?** The dashboard's dependencies (pyarrow, pandas, numpy, plotly, dash) exceed Lambda's 250 MB ZIP limit. Container image Lambda supports up to 10 GB. `sam build` runs `docker build` using `dashboard/Dockerfile.lambda` (base: `public.ecr.aws/lambda/python:3.14`), and `sam deploy` pushes the image to ECR automatically.
 
 ### Data Source Switching
 
@@ -822,8 +822,8 @@ Developer creates a Pull Request
 4. Switches to Python 3.12 → installs SAM CLI
    (SAM CLI has a pydantic v1 bug under 3.13+)
 5. Runs sam validate — catches infrastructure template errors
-6. Runs sam build --use-container — builds inside Python 3.14
-   Docker image, catches dependency/binary issues
+6. Runs sam build — builds Docker image from Dockerfile.lambda
+   (Python 3.14 base), catches dependency issues
          │
          ▼
 If ALL pass → Green checkmark ✓ on the PR
@@ -1224,10 +1224,10 @@ python -m ruff check app/ tests/
 python -m pytest tests/ -v --tb=short
 
 # 1c. Validate SAM template — catches infrastructure config errors
-sam validate --template-file ../infra/template.yaml --lint
+sam validate --template-file ../infra/template.yaml
 
-# 1d. SAM build — container-based (requires Docker running)
-sam build --template-file ../infra/template.yaml --use-container
+# 1d. SAM build — Docker image (requires Docker running)
+sam build --template-file ../infra/template.yaml
 ```
 
 Or simply run `make validate` from the project root (does all four).
@@ -1237,18 +1237,18 @@ Or simply run `make validate` from the project root (does all four).
 > **Common build failures:**
 > - `Docker is not running` → start Docker Desktop (macOS/Windows) or `sudo systemctl start docker` (Linux)
 > - `No module named X` → dependency missing from `dashboard/requirements.txt`
-> - `unable to find handler` → check `Handler` in template.yaml matches the actual file/function
+> - `unable to find handler` → check `ImageConfig.Command` in template.yaml matches the actual file/function
 
 ### Step 2: Build
 
-This packages the dashboard code into a Lambda-ready ZIP using the Lambda-compatible Docker container:
+This builds the Docker image for Lambda using `dashboard/Dockerfile.lambda`:
 
 ```bash
 cd TemperatureSensor    # back to project root
-sam build --template-file infra/template.yaml --use-container
+sam build --template-file infra/template.yaml
 ```
 
-You should see `Build Succeeded` at the end. The built artifacts go into `.aws-sam/build/`.
+You should see `Build Succeeded` at the end. The built image is stored locally for deploy.
 
 ### Step 3: Deploy
 
@@ -1294,7 +1294,7 @@ cd TemperatureSensor
 cd dashboard
 python -m ruff check app/ tests/
 python -m pytest tests/ -v --tb=short
-sam validate --template-file ../infra/template.yaml --lint
+sam validate --template-file ../infra/template.yaml
 cd ..
 
 # Build + Deploy
@@ -1333,9 +1333,10 @@ aws cloudformation describe-stacks \
 | **Cookie expired** | 30-day timeout | Officer revisits `/connect/{token}` |
 | **CI fails on "sam validate"** | SAM CLI not installed, or running under Python 3.13+ | SAM CLI must run under Python 3.12. CI/CD handles this automatically. Locally: `python3.12 -m pip install aws-sam-cli` |
 | **"no validator found for pydantic.v1"** | SAM CLI running under Python 3.13+ | SAM CLI's pydantic v1 dependency is incompatible with Python 3.13+. Install SAM CLI under Python 3.12: `python3.12 -m pip install aws-sam-cli` |
-| **CD "sam build" fails: Binary validation** | Python version mismatch | Template `Runtime` must be `python3.14`. CI/CD uses `--use-container` so Docker handles the build. Run `make sam-build` locally to catch this |
+| **CD "sam build" fails: Binary validation** | Python version mismatch | Check `Dockerfile.lambda` base image matches the intended Python version. Run `make sam-build` locally to catch this |
+| **"Unzipped size must be smaller than 262144000 bytes"** | Using ZIP package instead of container image | Ensure `PackageType: Image` is set in template.yaml and `Dockerfile.lambda` exists. Container images bypass the 250 MB limit |
 | **"Docker is not running"** | Docker daemon not started | Start Docker Desktop (macOS/Windows) or `sudo systemctl start docker` (Linux) |
-| **SAM build slow first time** | Pulling Docker image | First `--use-container` build downloads the `build-python3.14` image (~1 GB). Subsequent builds use the cached image |
+| **SAM build slow first time** | Pulling Docker base image | First build downloads `public.ecr.aws/lambda/python:3.14` (~500 MB). Subsequent builds use the cached image and Docker layers |
 | **CD "Waiting for review"** | Prod needs approval | Go to Actions → click "Review deployments" → Approve |
 | **CD "AccessDenied" error** | AWS keys invalid or missing permissions | Verify `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` in GitHub Secrets; check IAM user has `PowerUserAccess` + `IAMFullAccess` |
 

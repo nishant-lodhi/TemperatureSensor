@@ -16,11 +16,12 @@ version = 0.1
 
 # ── DEV ─────────────────────────────────────────────────────────────────────
 [dev.deploy.parameters]
-stack_name         = "TempSensor-Dashboard-dev"
-resolve_s3         = true
-capabilities       = "CAPABILITY_IAM"
-confirm_changeset  = false
-region             = "us-west-2"
+stack_name           = "TempSensor-Dashboard-dev"
+resolve_s3           = true
+resolve_image_repos  = true
+capabilities         = "CAPABILITY_IAM"
+confirm_changeset    = false
+region               = "us-west-2"
 parameter_overrides = """
   Environment=dev
   DeploymentId=9f64e31089
@@ -33,11 +34,12 @@ parameter_overrides = """
 
 # # ── STAGING ─────────────────────────────────────────────────────────────────
 # [staging.deploy.parameters]
-# stack_name         = "TempSensor-Dashboard-staging"
-# resolve_s3         = true
-# capabilities       = "CAPABILITY_IAM"
-# confirm_changeset  = false
-# region             = "us-east-1"
+# stack_name           = "TempSensor-Dashboard-staging"
+# resolve_s3           = true
+# resolve_image_repos  = true
+# capabilities         = "CAPABILITY_IAM"
+# confirm_changeset    = false
+# region               = "us-east-1"
 # parameter_overrides = """
 #   Environment=staging
 #   DeploymentId=REPLACE_ME2
@@ -50,11 +52,12 @@ parameter_overrides = """
 
 # # ── PROD SERVER 1  (example: Region West — clients 14, 27) ─────────────────
 # [prod-server1.deploy.parameters]
-# stack_name         = "TempSensor-Dashboard-prod-server1"
-# resolve_s3         = true
-# capabilities       = "CAPABILITY_IAM"
-# confirm_changeset  = true
-# region             = "us-east-1"
+# stack_name           = "TempSensor-Dashboard-prod-server1"
+# resolve_s3           = true
+# resolve_image_repos  = true
+# capabilities         = "CAPABILITY_IAM"
+# confirm_changeset    = true
+# region               = "us-east-1"
 # parameter_overrides = """
 #   Environment=prod
 #   DeploymentId=REPLACE_WITH_ID
@@ -67,11 +70,12 @@ parameter_overrides = """
 
 # ── PROD SERVER 2  (uncomment when adding a second server) ──────────────────
 # [prod-server2.deploy.parameters]
-# stack_name         = "TempSensor-Dashboard-prod-server2"
-# resolve_s3         = true
-# capabilities       = "CAPABILITY_IAM"
-# confirm_changeset  = true
-# region             = "us-east-1"
+# stack_name           = "TempSensor-Dashboard-prod-server2"
+# resolve_s3           = true
+# resolve_image_repos  = true
+# capabilities         = "CAPABILITY_IAM"
+# confirm_changeset    = true
+# region               = "us-east-1"
 # parameter_overrides = """
 #   Environment=prod
 #   DeploymentId=REPLACE_WITH_ID

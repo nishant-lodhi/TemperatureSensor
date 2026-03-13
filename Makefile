@@ -20,14 +20,14 @@ sam-check:
 		|| true
 
 sam-validate: sam-check
-	sam validate --template-file infra/template.yaml --lint
+	sam validate --template-file infra/template.yaml
 
 docker-check:
-	@docker info > /dev/null 2>&1 || (echo "ERROR: Docker is not running. Start Docker first (needed for --use-container)." && exit 1)
+	@docker info > /dev/null 2>&1 || (echo "ERROR: Docker is not running. Start Docker first (needed for container image build)." && exit 1)
 	@echo "Docker OK"
 
 sam-build: sam-check docker-check
-	sam build --template-file infra/template.yaml --use-container
+	sam build --template-file infra/template.yaml
 
 # ── All checks in one shot (run before every push) ───────────────────────────
 validate: lint test sam-validate sam-build

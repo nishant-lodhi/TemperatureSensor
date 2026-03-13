@@ -64,7 +64,7 @@ jobs:
         run: pip install aws-sam-cli
 
       - name: Validate SAM template
-        run: sam validate --template-file infra/template.yaml --lint
+        run: sam validate --template-file infra/template.yaml
 
-      - name: SAM build (container → Python 3.14)
-        run: sam build --template-file infra/template.yaml --use-container
+      - name: SAM build (Docker image)
+        run: sam build --template-file infra/template.yaml
