@@ -9,10 +9,11 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import time
 from datetime import datetime, timezone
 from typing import Optional
+
+from app import config as cfg
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +38,7 @@ _moto_mock = None
 def _ensure_table(table_name: str):
     """Create DynamoDB table via moto when running locally."""
     global _moto_mock
-    if os.environ.get("AWS_MODE", "false").lower() == "true":
+    if cfg.AWS_MODE:
         return
     if _moto_mock is not None:
         return
@@ -45,7 +46,7 @@ def _ensure_table(table_name: str):
     _moto_mock = mock_aws()
     _moto_mock.start()
     import boto3
-    ddb = boto3.client("dynamodb", region_name=os.environ.get("AWS_REGION", "us-east-1"))
+    ddb = boto3.client("dynamodb", region_name=cfg.AWS_REGION)
     schema = {**_TABLE_SCHEMA, "TableName": table_name}
     try:
         ddb.create_table(**schema)
@@ -77,7 +78,7 @@ class AlertManager:
         _ensure_table(table_name)
         import boto3
         self._table = boto3.resource(
-            "dynamodb", region_name=os.environ.get("AWS_REGION", "us-east-1"),
+            "dynamodb", region_name=cfg.AWS_REGION,
         ).Table(table_name)
         self._load_active()
 
@@ -125,8 +126,7 @@ class AlertManager:
 
     def _in_cooldown(self, pk: str) -> bool:
         cd = self._cooldowns.get(pk, 0)
-        cooldown_sec = int(os.environ.get("ALERT_COOLDOWN_SEC", "300"))
-        return (time.time() - cd) < cooldown_sec
+        return (time.time() - cd) < cfg.ALERT_COOLDOWN_SEC
 
     def _create_alert(self, pk: str, device_id: str, alert_type: str,
                       severity: str, state: dict, now_iso: str):
@@ -139,7 +139,7 @@ class AlertManager:
             "state_triggered": f"ACTIVE#{now_iso}",
             "facility_id": state.get("facility_id", ""),
             "client_id": self._client_id,
-            "TTL": int(time.time()) + 90 * 86400,
+            "TTL": int(time.time()) + cfg.ALERT_TTL_DAYS * 86400,
         }
         self._memory[pk] = item
         try:
@@ -199,11 +199,11 @@ class AlertManager:
 
     def send_note_and_dismiss(self, device_id: str, alert_type: str, context: dict) -> bool:
         """Send note to Lambda X then auto-dismiss. Returns True on success."""
-        arn = os.environ.get("NOTE_LAMBDA_ARN", "")
+        arn = cfg.NOTE_LAMBDA_ARN
         if arn:
             try:
                 import boto3
-                boto3.client("lambda", region_name=os.environ.get("AWS_REGION", "us-east-1")).invoke(
+                boto3.client("lambda", region_name=cfg.AWS_REGION).invoke(
                     FunctionName=arn, InvocationType="Event",
                     Payload=json.dumps(context),
                 )

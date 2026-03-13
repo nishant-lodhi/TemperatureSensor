@@ -9,11 +9,6 @@ class TestAuthMiddleware:
             resp = c.get("/healthz")
             assert resp.status_code == 200
 
-    def test_mock_mode_returns_none(self):
-        with app.main.server.test_client() as c:
-            resp = c.get("/healthz")
-            assert resp.status_code == 200
-
 
 class TestDisconnectRoute:
     def test_disconnect_redirects(self):

@@ -22,7 +22,9 @@ _SEVERITY_MARKER = {
 }
 
 
-def _downsample(readings: list[dict], target: int = 2000) -> list[dict]:
+def _downsample(readings: list[dict], target: int | None = None) -> list[dict]:
+    if target is None:
+        target = cfg.CHART_DOWNSAMPLE_TARGET
     n = len(readings)
     if n <= target:
         return readings
@@ -60,7 +62,7 @@ def unified_chart(
     is_offline: bool = False,
     height: int = 360,
 ) -> go.Figure:
-    if len(readings) > 2000:
+    if len(readings) > cfg.CHART_DOWNSAMPLE_TARGET:
         readings = _downsample(readings)
 
     h_ts = [r["timestamp"] for r in readings]
@@ -77,7 +79,7 @@ def unified_chart(
             line=dict(width=0), showlegend=False, hoverinfo="skip",
         ))
 
-    line_color = "#94a3b8" if is_offline else cfg.COLORS["primary"]
+    line_color = cfg.COLORS["offline"] if is_offline else cfg.COLORS["primary"]
     line_dash = "dot" if is_offline else "solid"
     fig.add_trace(go.Scatter(
         x=h_ts, y=h_t, mode="lines",
@@ -132,9 +134,9 @@ def unified_chart(
 
     if h_ts:
         if is_offline:
-            _add_marker_line(fig, h_ts[-1], "Last Reading", "#94a3b8")
+            _add_marker_line(fig, h_ts[-1], "Last Reading", cfg.COLORS["offline"])
         elif range_mode == "live" and fc_series:
-            _add_marker_line(fig, h_ts[-1], "Now", "#94a3b8")
+            _add_marker_line(fig, h_ts[-1], "Now", cfg.COLORS["offline"])
 
     _apply_layout(fig, height, range_mode, is_offline)
     return fig
@@ -244,7 +246,7 @@ def _apply_layout(fig, height, range_mode, is_offline):
     if is_offline:
         title = dict(
             text="Offline — Last Known Data",
-            font=dict(size=10, color="#94a3b8"), x=0.5,
+            font=dict(size=10, color=cfg.COLORS["offline"]), x=0.5,
         )
     fig.update_layout(
         template=cfg.CHART_TEMPLATE,

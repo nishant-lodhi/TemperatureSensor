@@ -6,6 +6,7 @@ import os
 AWS_MODE = os.environ.get("AWS_MODE", "false").lower() == "true"
 AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
 ENVIRONMENT = os.environ.get("ENVIRONMENT", "dev")
+PROJECT_PREFIX = os.environ.get("PROJECT_PREFIX", "TempSensor")
 
 DATA_SOURCE = os.environ.get("DATA_SOURCE", "mysql")
 MYSQL_HOST = os.environ.get("MYSQL_HOST", "localhost")
@@ -20,10 +21,7 @@ PARQUET_PREFIX = os.environ.get("PARQUET_PREFIX", "sensor-data/")
 ALERTS_TABLE = os.environ.get("ALERTS_TABLE", "")
 NOTE_LAMBDA_ARN = os.environ.get("NOTE_LAMBDA_ARN", "")
 
-FACILITY_NAME = os.environ.get("FACILITY_NAME", "")
-
 REFRESH_MONITOR_MS = 15_000
-REFRESH_HISTORY_MS = 30_000
 
 TEMP_HIGH = 85.0
 TEMP_LOW = 65.0
@@ -33,27 +31,43 @@ COMPLIANCE_TARGET = 95.0
 
 BATTERY_LOW = 20
 BATTERY_WARN = 40
-SIGNAL_WEAK = -80
 
 ALERT_COOLDOWN_SEC = 300
-ALERT_ESCALATE_AFTER_SEC = 900
 ALERT_OFFLINE_THRESHOLD_SEC = 300
 ALERT_DEGRADED_THRESHOLD_SEC = 120
+
+MAX_HISTORY_DAYS = 120
+COMPLIANCE_DAYS = 7
+CHART_DOWNSAMPLE_TARGET = 2000
+CHART_HEIGHT_DEFAULT = 360
+CHART_HEIGHT_EXTENDED = 400
+
+MYSQL_CONNECT_TIMEOUT = 5
+MYSQL_READ_TIMEOUT = 15
+MYSQL_WRITE_TIMEOUT = 10
+MYSQL_MAX_CONN_AGE = 50
+MYSQL_QUERY_LIMIT = 3000
+
+PARQUET_CACHE_TTL = 120
+ALERT_TTL_DAYS = 90
+
+CACHE_TTL_STATES = 15
+CACHE_TTL_COMPLIANCE = 60
+CACHE_TTL_ALERTS = 10
+CACHE_TTL_LOCATIONS = 120
+CACHE_TTL_READINGS = 60
+CACHE_TTL_TAG_LOCATIONS = 300
 
 # ── Light theme inspired by correctional facility admin panel ─────────────
 COLORS = {
     "bg": "#f0f2f5",
-    "bg_subtle": "#e8ecf0",
     "card": "#ffffff",
-    "card_solid": "#ffffff",
-    "card_hover": "#f8fafb",
     "card_border": "#e2e8f0",
     "text": "#1e293b",
     "text_muted": "#64748b",
     "primary": "#0d9488",
     "primary_light": "#14b8a6",
     "primary_dim": "rgba(13,148,136,0.07)",
-    "primary_glow": "rgba(13,148,136,0.14)",
     "accent": "#f97316",
     "accent_dim": "rgba(249,115,22,0.07)",
     "success": "#16a34a",
@@ -66,6 +80,8 @@ COLORS = {
     "safe_zone": "rgba(13,148,136,0.04)",
     "selected": "rgba(13,148,136,0.10)",
     "header_bg": "#1e3a4a",
+    "offline": "#94a3b8",
+    "card_header_bg": "#f8fafc",
 }
 
 CARD_STYLE = {
@@ -101,6 +117,7 @@ HOVER_LABEL = dict(
 
 
 def _wifi_svg(arcs=3, color="#16a34a"):
+    """Generate a data-URI SVG wifi icon with *arcs* lit arcs in *color*."""
     dim = "rgba(0,0,0,0.08)"
     c = [dim, dim, dim]
     for i in range(arcs):

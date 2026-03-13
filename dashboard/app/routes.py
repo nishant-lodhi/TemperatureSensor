@@ -3,6 +3,8 @@
 Extracted from main.py to keep app creation separate from HTTP plumbing.
 """
 
+import os
+
 from flask import Response, g, make_response, redirect, request
 
 from app import config as cfg
@@ -19,8 +21,8 @@ def register(server):
         g.client_id = None
         g.client_name = None
         if not cfg.AWS_MODE:
-            g.client_id = "demo_client_1"
-            g.client_name = "Demo Facility"
+            g.client_id = os.environ.get("CLIENT_ID", "default")
+            g.client_name = os.environ.get("CLIENT_NAME", "Local Facility")
             return None
         path = request.path
         if any(path.startswith(p) for p in _AUTH_SKIP):
@@ -78,7 +80,8 @@ def register(server):
         try:
             t0 = _t.time()
             from app.data.provider import get_provider
-            states = get_provider("demo_client_1").get_all_sensor_states()
+            cid = getattr(g, "client_id", None) or os.environ.get("CLIENT_ID", "default")
+            states = get_provider(cid).get_all_sensor_states()
             result["provider"] = f"OK ({len(states)} sensors) in {_t.time()-t0:.2f}s"
         except Exception as exc:
             result["provider"] = f"FAIL: {exc}"
@@ -86,6 +89,7 @@ def register(server):
 
 
 def _expired_page(msg: str = "Your session has expired") -> Response:
+    """Return a self-contained HTML page for expired / invalid sessions."""
     body = f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>TempMonitor</title>

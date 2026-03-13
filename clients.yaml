@@ -1,0 +1,47 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Client Registry — single source of truth for all tenant configuration.
+#
+# Onboarding a new client = adding one block here + running onboard script.
+#
+# isolation modes:
+#   shared   → clients share a DB; queries filter by client_id (customer_key)
+#   isolated → client has a dedicated DB; no filter needed
+# ─────────────────────────────────────────────────────────────────────────────
+
+defaults:
+  data_source: mysql            # mysql | parquet | hybrid
+  isolation: shared             # shared | isolated
+  db:
+    port: 3306
+    connect_timeout: 5
+    read_timeout: 15
+    write_timeout: 10
+
+clients:
+  # ── Example: shared DB (all clients on same Aurora cluster) ──────────────
+  "14":
+    name: "County Jail West"
+    isolation: shared
+    db:
+      host: ${MYSQL_HOST}
+      user: ${MYSQL_USER}
+      password: ${MYSQL_PASSWORD}
+      database: ${MYSQL_DATABASE}
+    parquet:
+      bucket: ""
+      prefix: "sensor-data/client-14/"
+    alerts_table: ""              # auto-generated if empty
+
+  # ── Template for isolated DB client (uncomment and fill) ─────────────────
+  # "27":
+  #   name: "State Prison East"
+  #   isolation: isolated
+  #   db:
+  #     host: "cluster-east.rds.amazonaws.com"
+  #     user: "app_user"
+  #     password: ${CLIENT_27_DB_PASSWORD}
+  #     database: "state_east_db"
+  #   parquet:
+  #     bucket: "state-east-parquet"
+  #     prefix: "sensor-data/"
+  #   alerts_table: "TempMonitor-Alerts-27"

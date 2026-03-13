@@ -39,7 +39,7 @@ _RANGES = [
     {"label": "12 h", "value": "12"},
     {"label": "24 h", "value": "24"},
 ]
-_MAX_HISTORY_DAYS = 120
+_MAX_HISTORY_DAYS = cfg.MAX_HISTORY_DAYS
 _TS = cfg.COLORS["text"]
 _TM = cfg.COLORS["text_muted"]
 _PR = cfg.COLORS["primary"]
@@ -272,7 +272,7 @@ def state_pump(_, selected_id, location_filter):
     prov = get_provider(get_client_id())
     states = prov.get_all_sensor_states()
     alerts = prov.get_live_alerts()
-    compliance = prov.get_compliance_history(7)
+    compliance = prov.get_compliance_history(cfg.COMPLIANCE_DAYS)
 
     visible = (
         [s for s in states if s.get("location") == location_filter]
@@ -346,7 +346,7 @@ def _fetch_readings(prov, device_id, range_mode, states, date_range=None):
     )
     show_fc = range_mode == "live" and not is_offline
     fc = prov.get_forecast_series(device_id, "30min", 30) if show_fc else []
-    alert_hist = prov.get_alert_history(device_id, days=max(hours // 24, 7))
+    alert_hist = prov.get_alert_history(device_id, days=max(hours // 24, cfg.COMPLIANCE_DAYS))
     fc_alerts = _build_forecast_alerts(fc, device_id) if fc else []
 
     return {
@@ -683,7 +683,7 @@ def render_grid(states, alerts, selected_id, status_filter, location_filter):
             "red": cfg.COLORS["danger"],
         }.get(s.get("_color"), _TM)
         if st == "offline":
-            c = "#94a3b8"
+            c = cfg.COLORS["offline"]
         bat_c = (
             cfg.COLORS["danger"] if bat < cfg.BATTERY_LOW
             else cfg.COLORS["warning"] if bat < cfg.BATTERY_WARN
@@ -904,7 +904,7 @@ def render_chart(rd):
     h = 2 if rm == "live" else int(rm) if rm and rm.isdigit() else 2
     fig = unified_chart(
         rd["readings"], rd.get("forecast", []), rd.get("alerts", []),
-        rm, rd.get("offline", False), 360 if h <= 48 else 400,
+        rm, rd.get("offline", False), cfg.CHART_HEIGHT_DEFAULT if h <= 48 else cfg.CHART_HEIGHT_EXTENDED,
     )
     return dbc.Card(
         dcc.Graph(figure=fig, config={"displayModeBar": False}),
@@ -960,7 +960,7 @@ def render_compliance(states, comp, location_filter):
         _stat("Too Cold", str(cold),
               _PR if cold else cfg.COLORS["success"]),
         _stat("Offline", str(offline_n),
-              "#94a3b8" if offline_n else cfg.COLORS["success"]),
+              cfg.COLORS["offline"] if offline_n else cfg.COLORS["success"]),
     ], style={
         "display": "flex", "gap": "10px", "flexWrap": "wrap",
         "justifyContent": "center", "padding": "4px 0",
@@ -970,7 +970,7 @@ def render_compliance(states, comp, location_filter):
     return dbc.Row([
         dbc.Col(dbc.Card([
             dbc.CardHeader(gl, style={
-                "backgroundColor": "#f8fafc", "border": "none",
+                "backgroundColor": cfg.COLORS["card_header_bg"], "border": "none",
                 "fontWeight": "600", "fontSize": "0.78rem", "color": _TM,
             }),
             dbc.CardBody([
@@ -981,7 +981,7 @@ def render_compliance(states, comp, location_filter):
         ], className="wcard"), lg=5, className="mb-3"),
         dbc.Col(dbc.Card([
             dbc.CardHeader("7-Day Compliance Trend", style={
-                "backgroundColor": "#f8fafc", "border": "none",
+                "backgroundColor": cfg.COLORS["card_header_bg"], "border": "none",
                 "fontWeight": "600", "fontSize": "0.78rem", "color": _TM,
             }),
             dbc.CardBody(dcc.Graph(
@@ -1018,7 +1018,7 @@ def render_alert_table(rd):
                  for c in ["Priority", "Type", "What", "When", "Status"]],
         data=td, sort_action="native", page_size=8,
         style_header={
-            "backgroundColor": "#f8fafc", "color": _TM,
+            "backgroundColor": cfg.COLORS["card_header_bg"], "color": _TM,
             "fontWeight": "600",
             "border": f"1px solid {_BD}",
             "fontSize": "0.7rem", "textTransform": "uppercase",
@@ -1044,7 +1044,7 @@ def render_alert_table(rd):
     )
     return dbc.Card([
         dbc.CardHeader("Alert History", style={
-            "backgroundColor": "#f8fafc", "border": "none",
+            "backgroundColor": cfg.COLORS["card_header_bg"], "border": "none",
             "fontWeight": "600", "fontSize": "0.78rem", "color": _TM,
         }),
         dbc.CardBody(tbl),

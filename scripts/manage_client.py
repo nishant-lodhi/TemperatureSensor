@@ -2,7 +2,7 @@
 """Client management CLI — add, list, remove, and rotate access tokens.
 
 Each client gets a Secrets Manager secret at:
-  TempMonitor/{deployment_id}/{client_id}
+  {project_prefix}/{deployment_id}/{client_id}
 
 The secret contains:
   {
@@ -30,19 +30,23 @@ import boto3
 from botocore.exceptions import ClientError
 
 
-def _secret_name(deployment_id: str, client_id: str) -> str:
-    return f"TempMonitor/{deployment_id}/{client_id}"
+DEFAULT_PREFIX = os.environ.get("PROJECT_PREFIX", "TempSensor")
+
+
+def _secret_name(deployment_id: str, client_id: str, prefix: str = "") -> str:
+    return f"{prefix or DEFAULT_PREFIX}/{deployment_id}/{client_id}"
 
 
 def _new_token() -> str:
     return str(uuid.uuid4())
 
 
-def _resolve_dashboard_url(region: str, deployment_id: str) -> str:
+def _resolve_dashboard_url(region: str, deployment_id: str, prefix: str = "") -> str:
     """Try to get the dashboard URL from CloudFormation stack outputs."""
+    prefix = prefix or DEFAULT_PREFIX
     cf = boto3.client("cloudformation", region_name=region)
     for suffix in ["dev", "staging", "prod", "saas-dev", "govcloud-dev", "govcloud-prod"]:
-        stack_name = f"TempMonitor-{suffix}"
+        stack_name = f"{prefix}-{suffix}"
         try:
             resp = cf.describe_stacks(StackName=stack_name)
             outputs = resp["Stacks"][0].get("Outputs", [])
@@ -61,7 +65,7 @@ def _resolve_dashboard_url(region: str, deployment_id: str) -> str:
 
 def cmd_add(args):
     sm = boto3.client("secretsmanager", region_name=args.region)
-    name = _secret_name(args.deployment_id, args.client_id)
+    name = _secret_name(args.deployment_id, args.client_id, args.project_prefix)
     token = _new_token()
 
     secret_value = {
@@ -83,10 +87,10 @@ def cmd_add(args):
             sys.exit(1)
         raise
 
-    base_url = args.dashboard_url or _resolve_dashboard_url(args.region, args.deployment_id)
+    base_url = args.dashboard_url or _resolve_dashboard_url(args.region, args.deployment_id, args.project_prefix)
     url_display = f"{base_url}/connect/{token}" if base_url else f"https://<YOUR-DASHBOARD-URL>/connect/{token}"
 
-    print(f"Client created successfully.")
+    print("Client created successfully.")
     print(f"  Client ID:    {args.client_id}")
     print(f"  Client Name:  {args.client_name}")
     print(f"  Secret Name:  {name}")
@@ -94,7 +98,7 @@ def cmd_add(args):
     if not base_url:
         print()
         print("  TIP: Could not auto-detect dashboard URL. Pass --dashboard-url or run:")
-        print(f"    aws cloudformation describe-stacks --stack-name TempMonitor-<env> --query 'Stacks[0].Outputs' --output table")
+        print(f"    aws cloudformation describe-stacks --stack-name {args.project_prefix}-<env> --query 'Stacks[0].Outputs' --output table")
     print()
     print("Share the access URL with facility officers.")
     print("They only need to visit this link once — a session cookie will persist access.")
@@ -102,7 +106,7 @@ def cmd_add(args):
 
 def cmd_list(args):
     sm = boto3.client("secretsmanager", region_name=args.region)
-    prefix = f"TempMonitor/{args.deployment_id}/"
+    prefix = f"{args.project_prefix}/{args.deployment_id}/"
     clients = []
 
     paginator = sm.get_paginator("list_secrets")
@@ -124,7 +128,7 @@ def cmd_list(args):
         print(f"No clients found for deployment '{args.deployment_id}'.")
         return
 
-    base_url = args.dashboard_url or _resolve_dashboard_url(args.region, args.deployment_id)
+    base_url = args.dashboard_url or _resolve_dashboard_url(args.region, args.deployment_id, args.project_prefix)
     domain = base_url if base_url else "https://<DASHBOARD-URL>"
 
     print(f"Clients for deployment '{args.deployment_id}':")
@@ -137,7 +141,7 @@ def cmd_list(args):
 
 def cmd_remove(args):
     sm = boto3.client("secretsmanager", region_name=args.region)
-    name = _secret_name(args.deployment_id, args.client_id)
+    name = _secret_name(args.deployment_id, args.client_id, args.project_prefix)
 
     try:
         sm.delete_secret(SecretId=name, ForceDeleteWithoutRecovery=True)
@@ -152,7 +156,7 @@ def cmd_remove(args):
 
 def cmd_rotate(args):
     sm = boto3.client("secretsmanager", region_name=args.region)
-    name = _secret_name(args.deployment_id, args.client_id)
+    name = _secret_name(args.deployment_id, args.client_id, args.project_prefix)
 
     try:
         resp = sm.get_secret_value(SecretId=name)
@@ -169,7 +173,7 @@ def cmd_rotate(args):
 
     sm.put_secret_value(SecretId=name, SecretString=json.dumps(data))
 
-    base_url = args.dashboard_url or _resolve_dashboard_url(args.region, args.deployment_id)
+    base_url = args.dashboard_url or _resolve_dashboard_url(args.region, args.deployment_id, args.project_prefix)
     domain = base_url if base_url else "https://<DASHBOARD-URL>"
 
     print(f"Token rotated for client '{args.client_id}'.")
@@ -181,8 +185,10 @@ def cmd_rotate(args):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="TempMonitor client management")
+    parser = argparse.ArgumentParser(description="TempSensor client management")
     parser.add_argument("--region", default=os.environ.get("AWS_REGION", "us-west-2"), help="AWS region")
+    parser.add_argument("--project-prefix", default=DEFAULT_PREFIX,
+                        help=f"Project prefix for resource naming (default: {DEFAULT_PREFIX})")
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_add = sub.add_parser("add", help="Create a new client")

@@ -1,11 +1,17 @@
 """TempMonitor Dashboard — app creation, layout, clock."""
 
-import dash
-import dash_bootstrap_components as dbc
-from dash import Input, Output, dcc, html
+import os
 
-from app import config as cfg
-from app.routes import register
+from dotenv import load_dotenv
+
+load_dotenv()
+
+import dash  # noqa: E402
+import dash_bootstrap_components as dbc  # noqa: E402
+from dash import Input, Output, dcc, html  # noqa: E402
+
+from app import config as cfg  # noqa: E402
+from app.routes import register  # noqa: E402
 
 app = dash.Dash(
     __name__, use_pages=True, pages_folder="pages",
@@ -81,6 +87,7 @@ app.layout = html.Div([
     Input("clock-interval", "n_intervals"),
 )
 def update_clock(_):
+    """Tick every second — update navbar clock and client badge."""
     from datetime import datetime, timezone
     return (
         datetime.now(timezone.utc).strftime("%b %d, %Y  %H:%M:%S UTC"),
@@ -96,4 +103,4 @@ if __name__ == "__main__":
         warmup()
     except Exception as exc:
         logging.getLogger(__name__).warning("MySQL warm-up failed: %s", exc)
-    app.run(debug=False, host="0.0.0.0", port=8051)
+    app.run(debug=False, host="0.0.0.0", port=int(os.environ.get("PORT", "8051")))

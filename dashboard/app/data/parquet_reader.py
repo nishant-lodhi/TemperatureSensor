@@ -12,10 +12,11 @@ import logging
 import time
 from datetime import datetime, timedelta
 
+from app import config as cfg
+
 logger = logging.getLogger(__name__)
 
 _cache: dict[str, tuple[float, object]] = {}
-_CACHE_TTL = 120  # 2 minutes
 
 
 def read_day(bucket: str, prefix: str, date_str: str):
@@ -25,7 +26,7 @@ def read_day(bucket: str, prefix: str, date_str: str):
     key = f"{bucket}/{prefix}{date_str}"
     if key in _cache:
         ts, df = _cache[key]
-        if (time.time() - ts) < _CACHE_TTL:
+        if (time.time() - ts) < cfg.PARQUET_CACHE_TTL:
             return df
 
     try:

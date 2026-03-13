@@ -60,7 +60,7 @@ OFFLINE_SENSORS = [
 
 TEMP_HIGH, TEMP_LOW = 85.0, 65.0
 TEMP_CRIT_HIGH, TEMP_CRIT_LOW = 95.0, 50.0
-HISTORY_DAYS = 300
+HISTORY_DAYS = 10
 OFFLINE_HOURS = 2
 
 # ── Temperature generator ────────────────────────────────────────────────────
@@ -432,29 +432,6 @@ def _run_generator(provider: SimulatorProvider, interval: float):
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
-
-
-def _bootstrap():
-    """Seed provider and inject into app.data.provider cache."""
-    import os
-    import sys
-    dashboard_dir = os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), "dashboard")
-    if dashboard_dir not in sys.path:
-        sys.path.insert(0, dashboard_dir)
-
-    provider = SimulatorProvider()
-    provider.seed_history()
-
-    t = threading.Thread(target=_run_generator, args=(provider, 5.0),
-                         daemon=True)
-    t.start()
-
-    import app.data.provider as prov_mod
-    prov_mod._providers["demo_client_1"] = provider
-    prov_mod._providers["default"] = provider
-    prov_mod._providers[None] = provider
-    return provider
 
 
 def main():

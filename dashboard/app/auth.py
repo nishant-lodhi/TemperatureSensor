@@ -1,7 +1,7 @@
 """Authentication — Secrets Manager token resolution + signed cookie management.
 
 Flow:
-  1. Admin creates a secret in Secrets Manager: TempMonitor/{deploy_id}/{client_id}
+  1. Admin creates a secret: {PROJECT_PREFIX}/{deploy_id}/{client_id}
   2. Officer visits /connect/{token} — token is resolved to a client_id
   3. Signed HttpOnly cookie is set — subsequent requests use the cookie
   4. Cookie contains token_hint (first 8 chars) for revocation detection
@@ -31,8 +31,9 @@ COOKIE_MAX_AGE = 30 * 24 * 3600  # 30 days
 
 
 def load_token_map(deployment_id: Optional[str] = None) -> dict:
-    """Read all TempMonitor/{deployment_id}/* secrets, return {token: {client_id, client_name}}.
+    """Read all {PROJECT_PREFIX}/{deployment_id}/* secrets.
 
+    Returns {token: {client_id, client_name}}.
     Results are cached for 5 minutes to avoid excessive Secrets Manager calls.
     """
     global _TOKEN_MAP, _TOKEN_MAP_TS
@@ -40,8 +41,9 @@ def load_token_map(deployment_id: Optional[str] = None) -> dict:
     if _TOKEN_MAP and (now - _TOKEN_MAP_TS) < _CACHE_TTL:
         return _TOKEN_MAP
 
+    from app import config as cfg
     deploy_id = deployment_id or DEPLOYMENT_ID
-    prefix = f"TempMonitor/{deploy_id}/"
+    prefix = f"{cfg.PROJECT_PREFIX}/{deploy_id}/"
 
     try:
         import boto3

@@ -4,6 +4,11 @@ Description: >
   TempMonitor — Dashboard stack with hybrid data (MySQL/Parquet),
   DynamoDB alerts, and multi-tenant auth.
 
+# ── Naming Convention ──────────────────────────────────────────────────────
+# All resources: {ProjectPrefix}-{Resource}-{DeploymentId}-{Environment}
+# Example:       TempSensor-Dashboard-a1b2c3d4e5-prod
+# ───────────────────────────────────────────────────────────────────────────
+
 Parameters:
   Environment:
     Type: String
@@ -16,7 +21,8 @@ Parameters:
     Default: "0000000000"
   ProjectPrefix:
     Type: String
-    Default: temp-sensor
+    Default: TempSensor
+    Description: "Prefix for all resource names (no spaces, alphanumeric + hyphens)"
   CookieSecret:
     Type: String
     Default: ""
@@ -52,6 +58,10 @@ Parameters:
     Type: String
     Description: "ARN of Lambda to invoke for officer notes (optional)"
     Default: ""
+  ClientsYaml:
+    Type: String
+    Description: "Path to clients.yaml inside Lambda package (optional)"
+    Default: "clients.yaml"
 
 Conditions:
   GenerateCookieSecret: !Equals [!Ref CookieSecret, ""]
@@ -75,7 +85,7 @@ Resources:
   AlertsTable:
     Type: AWS::DynamoDB::Table
     Properties:
-      TableName: !Sub "TempMonitor-Alerts-${DeploymentId}"
+      TableName: !Sub "${ProjectPrefix}-Alerts-${DeploymentId}-${Environment}"
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
         - { AttributeName: PK, AttributeType: S }
@@ -94,22 +104,34 @@ Resources:
       TimeToLiveSpecification:
         AttributeName: TTL
         Enabled: true
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectPrefix
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: DeploymentId
+          Value: !Ref DeploymentId
 
   # ── API Gateway ─────────────────────────────────────────────────────────
   DashboardApi:
     Type: AWS::Serverless::HttpApi
     Properties:
       StageName: $default
+      Description: !Sub "${ProjectPrefix} Dashboard API — ${DeploymentId} ${Environment}"
       CorsConfiguration:
         AllowOrigins: ["*"]
         AllowMethods: ["GET", "POST"]
         AllowHeaders: ["*"]
+      Tags:
+        Project: !Ref ProjectPrefix
+        Environment: !Ref Environment
+        DeploymentId: !Ref DeploymentId
 
   # ── Dashboard Lambda ────────────────────────────────────────────────────
   DashboardFunction:
     Type: AWS::Serverless::Function
     Properties:
-      FunctionName: !Sub "TempMonitor-Dashboard-${DeploymentId}-${Environment}"
+      FunctionName: !Sub "${ProjectPrefix}-Dashboard-${DeploymentId}-${Environment}"
       Handler: lambda_handler.handler
       CodeUri: ../dashboard/
       MemorySize: 512
@@ -127,10 +149,16 @@ Resources:
           PARQUET_PREFIX: !Ref ParquetPrefix
           ALERTS_TABLE: !Ref AlertsTable
           NOTE_LAMBDA_ARN: !Ref NoteLambdaArn
+          CLIENTS_YAML: !Ref ClientsYaml
+          PROJECT_PREFIX: !Ref ProjectPrefix
           COOKIE_SECRET: !If
             - GenerateCookieSecret
             - !Sub "auto-${DeploymentId}-${AWS::StackName}"
             - !Ref CookieSecret
+      Tags:
+        Project: !Ref ProjectPrefix
+        Environment: !Ref Environment
+        DeploymentId: !Ref DeploymentId
       Policies:
         - Version: "2012-10-17"
           Statement:
@@ -139,7 +167,7 @@ Resources:
               Resource: "*"
             - Effect: Allow
               Action: [secretsmanager:GetSecretValue]
-              Resource: !Sub "arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:TempMonitor/${DeploymentId}/*"
+              Resource: !Sub "arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${ProjectPrefix}/${DeploymentId}/*"
         - DynamoDBCrudPolicy:
             TableName: !Ref AlertsTable
         - !If
@@ -173,8 +201,8 @@ Resources:
   DashboardErrorAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
-      AlarmName: !Sub "TempMonitor-Dashboard-Errors-${DeploymentId}-${Environment}"
-      AlarmDescription: "Dashboard Lambda 5+ errors in 5 minutes."
+      AlarmName: !Sub "${ProjectPrefix}-Dashboard-Errors-${DeploymentId}-${Environment}"
+      AlarmDescription: !Sub "${ProjectPrefix} Dashboard Lambda 5+ errors in 5 minutes."
       Namespace: AWS/Lambda
       MetricName: Errors
       Dimensions:
@@ -194,3 +222,9 @@ Outputs:
   AlertsTableName:
     Description: "DynamoDB alerts table name"
     Value: !Ref AlertsTable
+  DashboardFunctionName:
+    Description: "Dashboard Lambda function name"
+    Value: !Ref DashboardFunction
+  StackNamingPattern:
+    Description: "Resource naming convention used"
+    Value: !Sub "${ProjectPrefix}-{Resource}-${DeploymentId}-${Environment}"

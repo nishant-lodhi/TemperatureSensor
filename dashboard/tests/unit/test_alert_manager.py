@@ -8,7 +8,6 @@ import pytest
 
 os.environ["AWS_MODE"] = "false"
 os.environ["ALERTS_TABLE"] = "test-alerts-unit"
-os.environ["ALERT_COOLDOWN_SEC"] = "1"
 
 from app.data.alert_manager import AlertManager
 
@@ -75,7 +74,9 @@ class TestDismiss:
         alerts = mgr.evaluate([_make_state(temp=98.0)])
         assert not any(a["alert_type"] == "EXTREME_TEMPERATURE" for a in alerts)
 
-    def test_cooldown_expires(self, mgr):
+    def test_cooldown_expires(self, mgr, monkeypatch):
+        from app import config as _cfg
+        monkeypatch.setattr(_cfg, "ALERT_COOLDOWN_SEC", 1)
         mgr.evaluate([_make_state(temp=98.0)])
         mgr.dismiss("AA:BB:CC:DD:EE:01", "EXTREME_TEMPERATURE")
         time.sleep(1.5)

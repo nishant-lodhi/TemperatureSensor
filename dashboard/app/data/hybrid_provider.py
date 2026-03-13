@@ -1,17 +1,18 @@
 """Hybrid data provider — thin orchestrator.
 
-Routes calls to mysql_reader / parquet_reader based on DATA_SOURCE flag,
-applies analytics, integrates with alert_manager.
+Routes calls to mysql_reader / parquet_reader based on DATA_SOURCE flag
+(or per-client registry config), applies analytics, integrates with
+alert_manager.  Uses ``client_id`` consistently — never ``customer_key``.
 """
 
 from __future__ import annotations
 
 import logging
-import os
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
+from app import config as cfg
 from app.data import analytics
 from app.data.alert_manager import AlertManager
 
@@ -23,33 +24,36 @@ class HybridProvider:
 
     def __init__(self, client_id: str):
         self._client_id = client_id
-        self._data_source = os.environ.get("DATA_SOURCE", "mysql").lower()
-        self._pq_bucket = os.environ.get("PARQUET_BUCKET", "")
-        self._pq_prefix = os.environ.get("PARQUET_PREFIX", "sensor-data/")
 
-        from app import config as cfg
+        from app.data.client_registry import get_client_config
+        cc = get_client_config(client_id)
+
+        self._data_source = (cc.data_source if cc else cfg.DATA_SOURCE).lower()
+        self._pq_bucket = cc.parquet_bucket if cc else cfg.PARQUET_BUCKET
+        self._pq_prefix = cc.parquet_prefix if cc else cfg.PARQUET_PREFIX
+
         self._thresholds = {
             "temp_high": cfg.TEMP_HIGH, "temp_low": cfg.TEMP_LOW,
             "critical_high": cfg.TEMP_CRITICAL_HIGH, "critical_low": cfg.TEMP_CRITICAL_LOW,
             "degraded_sec": cfg.ALERT_DEGRADED_THRESHOLD_SEC,
             "offline_sec": cfg.ALERT_OFFLINE_THRESHOLD_SEC,
         }
-        table = os.environ.get("ALERTS_TABLE", "") or f"TempMonitor-Alerts-local-{client_id}"
+        table = (cc.alerts_table if cc else cfg.ALERTS_TABLE) or f"TempMonitor-Alerts-local-{client_id}"
         self._alerts = AlertManager(client_id, table, self._thresholds)
 
-        self._cache: dict = {"states": None, "ts": 0, "ttl": 15}
+        self._cache: dict = {"states": None, "ts": 0, "ttl": cfg.CACHE_TTL_STATES}
         self._readings_cache: dict = {}
         self._loc_cache: dict = {}
         self._loc_ts: float = 0
         self._locations_cache: list[str] = []
         self._locations_ts: float = 0
-        self._compliance_cache: dict = {"data": None, "ts": 0, "ttl": 60}
-        self._alerts_cache: dict = {"data": None, "ts": 0, "ttl": 10}
+        self._compliance_cache: dict = {"data": None, "ts": 0, "ttl": cfg.CACHE_TTL_COMPLIANCE}
+        self._alerts_cache: dict = {"data": None, "ts": 0, "ttl": cfg.CACHE_TTL_ALERTS}
 
     # ── helpers ──────────────────────────────────────────────────────────────
 
-    def _ck(self) -> str | None:
-        """Return customer_key for SQL filtering (None for default/local)."""
+    def _cid(self) -> str | None:
+        """Return client_id for SQL filtering (None when default/local = no filter)."""
         return self._client_id if self._client_id and self._client_id != "default" else None
 
     def _use_parquet(self) -> bool:
@@ -60,7 +64,7 @@ class HybridProvider:
 
     def _tag_locations(self) -> dict:
         now = time.time()
-        if self._loc_cache and (now - self._loc_ts) < 300:
+        if self._loc_cache and (now - self._loc_ts) < cfg.CACHE_TTL_TAG_LOCATIONS:
             return self._loc_cache
         if not self._use_mysql():
             return {}
@@ -84,13 +88,13 @@ class HybridProvider:
 
     def get_locations(self) -> list[str]:
         now = time.time()
-        if self._locations_cache and (now - self._locations_ts) < 120:
+        if self._locations_cache and (now - self._locations_ts) < cfg.CACHE_TTL_LOCATIONS:
             return self._locations_cache
         if not self._use_mysql():
             return []
         from app.data import mysql_reader as db
         try:
-            self._locations_cache = db.fetch_distinct_locations(self._ck())
+            self._locations_cache = db.fetch_distinct_locations(self._cid())
             self._locations_ts = now
         except Exception as exc:
             logger.warning("fetch_distinct_locations failed: %s", exc)
@@ -101,7 +105,7 @@ class HybridProvider:
             return []
         from app.data import mysql_reader as db
         try:
-            return db.fetch_sensors_by_location(self._ck(), location)
+            return db.fetch_sensors_by_location(self._cid(), location)
         except Exception as exc:
             logger.warning("fetch_sensors_by_location failed: %s", exc)
             return []
@@ -116,7 +120,7 @@ class HybridProvider:
         from app.data import mysql_reader as db
 
         now = datetime.now(timezone.utc)
-        latest_rows = db.fetch_latest_per_sensor(self._ck())
+        latest_rows = db.fetch_latest_per_sensor(self._cid())
         if not latest_rows:
             self._cache.update(states=[], ts=now_ts)
             return []
@@ -127,7 +131,7 @@ class HybridProvider:
             (r["date_added"] for r in latest_rows if isinstance(r["date_added"], datetime)),
             default=now,
         ) - timedelta(hours=1)
-        hist = db.fetch_batch_history(mac_list, earliest, self._ck())
+        hist = db.fetch_batch_history(mac_list, earliest, self._cid())
 
         states = []
         for row in latest_rows:
@@ -150,7 +154,7 @@ class HybridProvider:
 
         cache_key = f"{device_id}|{since_iso}|{until_iso or 'now'}"
         cached = self._readings_cache.get(cache_key)
-        if cached and (time.time() - cached["ts"]) < 60:
+        if cached and (time.time() - cached["ts"]) < cfg.CACHE_TTL_READINGS:
             return cached["data"]
 
         readings: list[dict] = []
@@ -168,9 +172,9 @@ class HybridProvider:
     def _mysql_readings(self, device_id: str, since: datetime, until: datetime | None = None) -> list[dict]:
         from app.data import mysql_reader as db
         if until and until != since:
-            rows = db.fetch_readings_range(device_id, since, until)
+            rows = db.fetch_readings_range(device_id, since, until, client_id=self._cid())
         else:
-            rows = db.fetch_readings(device_id, since)
+            rows = db.fetch_readings(device_id, since, client_id=self._cid())
         out = []
         for r in rows:
             try:
@@ -186,7 +190,7 @@ class HybridProvider:
 
     def get_forecast(self, device_id: str, horizon: str) -> dict | None:
         from app.data import mysql_reader as db
-        ref = db.fetch_max_date(device_id)
+        ref = db.fetch_max_date(device_id, client_id=self._cid())
         if not ref:
             return None
         ref_utc = ref.replace(tzinfo=timezone.utc) if isinstance(ref, datetime) else None
@@ -203,7 +207,7 @@ class HybridProvider:
         if not fc or "model_params" not in fc:
             return []
         from app.data import mysql_reader as db
-        ref = db.fetch_max_date(device_id)
+        ref = db.fetch_max_date(device_id, client_id=self._cid())
         ref_utc = ref.replace(tzinfo=timezone.utc) if isinstance(ref, datetime) and ref else datetime.now(timezone.utc)
         return analytics.forecast_series(fc["model_params"], ref_utc, steps)
 
@@ -215,7 +219,6 @@ class HybridProvider:
         if cc["data"] is not None and (now_ts - cc["ts"]) < cc["ttl"]:
             return cc["data"]
 
-        from app import config as cfg
         now = datetime.now(timezone.utc)
         start = now - timedelta(days=days)
 
@@ -230,7 +233,7 @@ class HybridProvider:
             from app.data import mysql_reader as db
             rows = db.fetch_compliance_batch(
                 start.strftime("%Y-%m-%d 00:00:00"), now.strftime("%Y-%m-%d 23:59:59"),
-                cfg.TEMP_LOW, cfg.TEMP_HIGH, self._ck(),
+                cfg.TEMP_LOW, cfg.TEMP_HIGH, self._cid(),
             )
             for r in rows:
                 total = int(r["total"])
@@ -248,7 +251,7 @@ class HybridProvider:
 
     def get_all_devices(self) -> list[str]:
         from app.data import mysql_reader as db
-        return db.fetch_all_devices(self._ck())
+        return db.fetch_all_devices(self._cid())
 
     def get_zones(self) -> list[str]:
         loc = self._tag_locations()

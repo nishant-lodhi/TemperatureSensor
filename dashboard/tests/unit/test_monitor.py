@@ -1,7 +1,5 @@
 """Tests for unified monitor page — banner, grid, kpis, chart, compliance, alerts, filters."""
 
-import dash
-
 from tests.mock_provider import MockProvider
 
 _prov = MockProvider("test_client")
