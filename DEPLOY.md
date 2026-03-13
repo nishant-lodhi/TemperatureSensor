@@ -68,25 +68,26 @@ A serverless dashboard that monitors temperature sensors in correctional facilit
 
 Before starting, you need these tools on your computer. Follow each step exactly.
 
-### 1. Python 3.10 or Later
+### 1. Python 3.14
 
-Python is the programming language the dashboard is written in.
+Python is the programming language the dashboard is written in. The Lambda runtime uses Python 3.14, so your local version must match.
 
 **Check if already installed:**
 ```bash
 python3 --version
 ```
-If it prints `Python 3.10.x` or higher, skip to the next tool.
+If it prints `Python 3.14.x`, skip to the next tool.
 
 **Install on Ubuntu/Debian (Linux):**
 ```bash
+sudo add-apt-repository ppa:deadsnakes/ppa
 sudo apt update
-sudo apt install -y python3.10 python3.10-venv python3-pip
+sudo apt install -y python3.14 python3.14-venv python3-pip
 ```
 
 **Install on macOS:**
 ```bash
-brew install python@3.10
+brew install python@3.14
 ```
 
 **Install on Windows:**
@@ -163,7 +164,37 @@ It will ask for:
 
 > **Note**: If you are only doing local development (no AWS deployment), you do NOT need AWS CLI.
 
-### 5. AWS SAM CLI
+### 5. Docker
+
+Docker is required for container-based SAM builds. The `sam build --use-container` command pulls a Docker image matching the Lambda Python 3.14 runtime and compiles all dependencies inside it — this guarantees binary compatibility with Lambda (no more wheel/build failures).
+
+**Check if installed:**
+```bash
+docker --version
+```
+
+**Install on Ubuntu/Debian (Linux):**
+```bash
+sudo apt update
+sudo apt install -y docker.io
+sudo systemctl enable --now docker
+sudo usermod -aG docker $USER
+```
+Log out and back in after adding yourself to the docker group.
+
+**Install on macOS:**
+Download and install Docker Desktop from https://www.docker.com/products/docker-desktop/
+
+**Install on Windows:**
+Download and install Docker Desktop from https://www.docker.com/products/docker-desktop/
+
+**Verify Docker is running:**
+```bash
+docker info
+```
+If this errors, start Docker Desktop (macOS/Windows) or run `sudo systemctl start docker` (Linux).
+
+### 6. AWS SAM CLI
 
 SAM CLI packages and deploys your code to AWS Lambda.
 
@@ -178,7 +209,7 @@ sam --version
 ```
 You should see something like `SAM CLI, version 1.x.x`.
 
-### 6. GitHub Account
+### 7. GitHub Account
 
 You need a GitHub account to store code and run the CI/CD pipelines.
 
@@ -317,44 +348,51 @@ You should see the TempSensor dashboard with your sensors.
 
 Run these checks locally to catch issues **before** they reach CI/CD. This saves time — a failed CI run takes 3-5 minutes to discover vs. seconds locally.
 
+> **Requirement:** Docker must be running for `sam-build`. The build uses `--use-container` to compile dependencies inside a Lambda-compatible Docker image (Python 3.14). This eliminates wheel/binary mismatch errors.
+
+**Recommended — use Make (single command):**
+
+```bash
+make validate
+```
+
+This runs all checks in order: lint → test → SAM validate → Docker check → SAM build (container). If any step fails, it stops immediately.
+
+All Make targets:
+
+| Command              | What it does                                      |
+|----------------------|---------------------------------------------------|
+| `make lint`          | Code style check (ruff)                           |
+| `make test`          | Unit tests (pytest)                               |
+| `make sam-validate`  | SAM template syntax check                         |
+| `make sam-build`     | Container-based Lambda build (requires Docker)    |
+| `make validate`      | **All above, in order**                           |
+| `make install`       | Install production dependencies                   |
+| `make install-dev`   | Install production + dev dependencies             |
+| `make run`           | Start dashboard (gunicorn)                        |
+| `make run-debug`     | Start dashboard (debug mode)                      |
+
+**Manual (if you prefer running individually):**
+
 ```bash
 cd dashboard
 
-# ── 1. Lint (code style) ──────────────────────────────────────────────────
+# 1. Lint (code style)
 python -m ruff check app/ tests/
-# Expected: "All checks passed!" — if errors, fix them before pushing
 
-# ── 2. Unit tests ─────────────────────────────────────────────────────────
+# 2. Unit tests
 python -m pytest tests/ -v --tb=short
-# Expected: "158 passed" — if any fail, fix before pushing
 
-# ── 3. SAM template validation ────────────────────────────────────────────
-pip install aws-sam-cli    # one-time install if you haven't already
+# 3. SAM template validation
 sam validate --template-file ../infra/template.yaml --lint
-# Expected: "...is a valid SAM Template" — catches syntax/config errors
 
-# ── 4. SAM build (dry run — catches runtime/dependency mismatches) ────────
-sam build --template-file ../infra/template.yaml
-# Expected: "Build Succeeded"
-# This catches issues like:
-#   - Python runtime mismatch (e.g., template says 3.11 but you have 3.10)
-#   - Missing dependencies in requirements.txt
-#   - Invalid handler path
-# Tip: your local Python version must match the Runtime in template.yaml
+# 4. SAM build — container-based (requires Docker running)
+sam build --template-file ../infra/template.yaml --use-container
 ```
 
 **All four must pass** before you push. These are the same checks CI/CD runs — validating locally avoids waiting for a remote failure.
 
-**Quick one-liner** (copy-paste to run all 4 checks):
-
-```bash
-cd dashboard && \
-  python -m ruff check app/ tests/ && \
-  python -m pytest tests/ -q --tb=short && \
-  sam validate --template-file ../infra/template.yaml --lint && \
-  sam build --template-file ../infra/template.yaml && \
-  echo "✓ All pre-push checks passed — safe to push"
-```
+> **Why `--use-container`?** SAM pulls the official `public.ecr.aws/sam/build-python3.14` Docker image and installs dependencies inside it. This guarantees every native library (pyarrow, cryptography, etc.) is compiled for Amazon Linux — the exact OS Lambda uses. No more "Binary validation failed" or wheel-not-found errors.
 
 ### Data Source Switching
 
@@ -747,13 +785,15 @@ This workflow runs automatically on every Pull Request to `main` or `develop`. I
 Developer creates a Pull Request
          │
          ▼
-1. GitHub spins up a fresh Ubuntu machine
+1. GitHub spins up a fresh Ubuntu machine (has Docker pre-installed)
 2. Checks out your code
-3. Installs Python 3.10
+3. Installs Python 3.14
 4. Installs all pip dependencies
 5. Runs ruff (linter) — catches style errors
-6. Runs pytest (161 tests) — catches bugs
+6. Runs pytest (unit tests) — catches bugs
 7. Runs sam validate — catches infrastructure template errors
+8. Runs sam build --use-container — builds inside Lambda-compatible
+   Docker image, catches dependency/binary issues
          │
          ▼
 If ALL pass → Green checkmark ✓ on the PR
@@ -1156,24 +1196,26 @@ python -m pytest tests/ -v --tb=short
 # 1c. Validate SAM template — catches infrastructure config errors
 sam validate --template-file ../infra/template.yaml --lint
 
-# 1d. SAM build — catches runtime mismatches, missing dependencies
-sam build --template-file ../infra/template.yaml
+# 1d. SAM build — container-based (requires Docker running)
+sam build --template-file ../infra/template.yaml --use-container
 ```
+
+Or simply run `make validate` from the project root (does all four).
 
 **Do NOT proceed to Step 2 unless all four pass.** If any fail, fix the issues first.
 
 > **Common build failures:**
-> - `Binary validation failed for python` → your local Python version doesn't match the `Runtime` in `template.yaml` (both must be `python3.10`)
+> - `Docker is not running` → start Docker Desktop (macOS/Windows) or `sudo systemctl start docker` (Linux)
 > - `No module named X` → dependency missing from `dashboard/requirements.txt`
 > - `unable to find handler` → check `Handler` in template.yaml matches the actual file/function
 
 ### Step 2: Build
 
-This packages the dashboard code into a Lambda-ready ZIP:
+This packages the dashboard code into a Lambda-ready ZIP using the Lambda-compatible Docker container:
 
 ```bash
 cd TemperatureSensor    # back to project root
-sam build --template-file infra/template.yaml
+sam build --template-file infra/template.yaml --use-container
 ```
 
 You should see `Build Succeeded` at the end. The built artifacts go into `.aws-sam/build/`.
@@ -1260,7 +1302,9 @@ aws cloudformation describe-stacks \
 | **Alerts not appearing** | DynamoDB table missing | Check `ALERTS_TABLE`; locally, moto auto-creates it |
 | **Cookie expired** | 30-day timeout | Officer revisits `/connect/{token}` |
 | **CI fails on "sam validate"** | SAM CLI not installed | The CI workflow installs it; check pip step |
-| **CD "sam build" fails: Binary validation** | Python version mismatch | Template `Runtime` (e.g., `python3.10`) must match the Python version in the workflow `setup-python`. Run `sam build` locally first to catch this |
+| **CD "sam build" fails: Binary validation** | Python version mismatch | Template `Runtime` must be `python3.14`. Both CI/CD and local use `--use-container` so Docker handles the build. Run `make sam-build` locally first to catch this |
+| **"Docker is not running"** | Docker daemon not started | Start Docker Desktop (macOS/Windows) or `sudo systemctl start docker` (Linux) |
+| **SAM build slow first time** | Pulling Docker image | First `--use-container` build downloads the `build-python3.14` image (~1 GB). Subsequent builds use the cached image |
 | **CD "Waiting for review"** | Prod needs approval | Go to Actions → click "Review deployments" → Approve |
 | **CD "AccessDenied" error** | AWS keys invalid or missing permissions | Verify `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` in GitHub Secrets; check IAM user has `PowerUserAccess` + `IAMFullAccess` |
 

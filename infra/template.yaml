@@ -75,7 +75,7 @@ Conditions:
 
 Globals:
   Function:
-    Runtime: python3.10
+    Runtime: python3.14
     Architectures: [x86_64]
     MemorySize: 256
     Timeout: 60
