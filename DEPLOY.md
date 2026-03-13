@@ -66,199 +66,60 @@ A serverless dashboard that monitors temperature sensors in correctional facilit
 
 ## Prerequisites — Install Everything
 
-Before starting, you need these tools on your computer. Follow each step exactly.
+You need these tools on your computer. Lambda runs Python 3.14 inside a container image — you do NOT need Python 3.14 locally.
 
-### 1. Python 3.14 (App Runtime)
+| Tool | Purpose | Local dev | Deploying |
+|------|---------|-----------|-----------|
+| Python 3.12+ | Lint, tests, local dashboard | Required | Required |
+| Docker | Container image build for Lambda | For `make sam-build` | Required |
+| AWS CLI v2 | Talk to AWS | Optional | Required |
+| SAM CLI | Build + deploy Lambda | For `make sam-build` | Required |
+| Git | Version control | Required | Required |
 
-Python is the programming language the dashboard is written in. The Lambda runtime uses Python 3.14, so your local version must match for running lint and tests.
+### Python 3.12+
 
-**Check if already installed:**
 ```bash
-python3.14 --version
-```
-If it prints `Python 3.14.x`, skip to the next tool.
-
-**Install on Ubuntu/Debian (Linux):**
-```bash
-sudo add-apt-repository ppa:deadsnakes/ppa
-sudo apt update
-sudo apt install -y python3.14 python3.14-venv python3-pip
+python3 --version   # Need 3.12 or higher
 ```
 
-**Install on macOS:**
-```bash
-brew install python@3.14
-```
+If not installed: `sudo apt install -y python3 python3-pip` (Linux) or `brew install python` (macOS) or download from https://www.python.org/downloads/
 
-**Install on Windows:**
-Download from https://www.python.org/downloads/ — during install, check "Add Python to PATH".
+### Docker
 
-### 2. Python 3.12 (SAM CLI Host)
+Lambda is deployed as a container image (base: `public.ecr.aws/lambda/python:3.14`). Docker is needed to build it.
 
-SAM CLI has a known incompatibility with Python 3.13+ (pydantic v1 validator issue). You need **Python 3.12** installed alongside 3.14 to run SAM commands (`sam validate`, `sam build`).
-
-> **Note:** This only affects the SAM CLI tool itself. Your Lambda still runs Python 3.14 — the `Dockerfile.lambda` uses the `public.ecr.aws/lambda/python:3.14` base image.
-
-**Check if already installed:**
-```bash
-python3.12 --version
-```
-
-**Install on Ubuntu/Debian (Linux):**
-```bash
-sudo apt install -y python3.12 python3.12-venv
-```
-
-**Install on macOS:**
-```bash
-brew install python@3.12
-```
-
-**Install on Windows:**
-Download Python 3.12 from https://www.python.org/downloads/release/ — install alongside 3.14.
-
-**Install SAM CLI under Python 3.12:**
-```bash
-python3.12 -m pip install aws-sam-cli
-```
-
-### 3. pip
-
-pip installs Python libraries. It usually comes with Python.
-
-**Upgrade to latest version:**
-```bash
-python3 -m pip install --upgrade pip
-```
-
-### 4. Git
-
-Git tracks code changes and is used to push code to GitHub.
-
-**Check if installed:**
-```bash
-git --version
-```
-
-**Install on Ubuntu/Debian:**
-```bash
-sudo apt install -y git
-```
-
-**Install on macOS:**
-```bash
-brew install git
-```
-
-**Install on Windows:**
-Download from https://git-scm.com/downloads
-
-### 5. AWS CLI v2
-
-The AWS CLI lets you talk to AWS from your terminal. Needed for deployments.
-
-**Check if installed:**
-```bash
-aws --version
-```
-You need version 2.x. If you see version 1.x, uninstall it first.
-
-**Install on Linux:**
-```bash
-curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
-unzip awscliv2.zip
-sudo ./aws/install
-rm -rf aws awscliv2.zip
-```
-
-**Install on macOS:**
-```bash
-curl "https://awscli.amazonaws.com/AWSCLIV2.pkg" -o "AWSCLIV2.pkg"
-sudo installer -pkg AWSCLIV2.pkg -target /
-rm AWSCLIV2.pkg
-```
-
-**Install on Windows:**
-Download and run: https://awscli.amazonaws.com/AWSCLIV2.msi
-
-**Configure AWS CLI (one-time):**
-```bash
-aws configure
-```
-It will ask for:
-- **AWS Access Key ID**: Get from your AWS admin (IAM → Users → Security Credentials)
-- **AWS Secret Access Key**: Same place as above
-- **Default region**: `us-east-1` (or whatever region your DB is in)
-- **Default output format**: `json`
-
-> **Note**: If you are only doing local development (no AWS deployment), you do NOT need AWS CLI.
-
-### 6. Docker
-
-Docker is required because the Lambda is deployed as a **container image** (not a ZIP). `sam build` runs `docker build` using `dashboard/Dockerfile.lambda` to produce a Docker image based on `public.ecr.aws/lambda/python:3.14`. This approach bypasses the 250 MB ZIP limit and guarantees binary compatibility with Lambda.
-
-**Check if installed:**
 ```bash
 docker --version
 ```
 
-**Install on Ubuntu/Debian (Linux):**
+If not installed: `sudo apt install -y docker.io && sudo usermod -aG docker $USER` (Linux) or install Docker Desktop from https://www.docker.com/products/docker-desktop/ (macOS/Windows).
+
+### AWS CLI v2 + SAM CLI
+
 ```bash
-sudo apt update
-sudo apt install -y docker.io
-sudo systemctl enable --now docker
-sudo usermod -aG docker $USER
-```
-Log out and back in after adding yourself to the docker group.
-
-**Install on macOS:**
-Download and install Docker Desktop from https://www.docker.com/products/docker-desktop/
-
-**Install on Windows:**
-Download and install Docker Desktop from https://www.docker.com/products/docker-desktop/
-
-**Verify Docker is running:**
-```bash
-docker info
-```
-If this errors, start Docker Desktop (macOS/Windows) or run `sudo systemctl start docker` (Linux).
-
-### 7. AWS SAM CLI
-
-SAM CLI packages and deploys your code to AWS Lambda. **Must be installed under Python 3.12** (not 3.14) due to the pydantic compatibility issue.
-
-**Install:**
-```bash
-python3.12 -m pip install aws-sam-cli
+aws --version    # Need aws-cli/2.x
+sam --version    # Need SAM CLI 1.x
 ```
 
-**Verify:**
+**AWS CLI:** https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html
+
+**SAM CLI:** `pip install aws-sam-cli`
+
+**Configure AWS (one-time):**
 ```bash
-sam --version
+aws configure
+# Enter: Access Key ID, Secret Key, Region (us-east-1), Output (json)
 ```
-You should see something like `SAM CLI, version 1.x.x`.
-
-### 8. GitHub Account
-
-You need a GitHub account to store code and run the CI/CD pipelines.
-
-Sign up at https://github.com if you do not have one.
 
 ### Summary Checklist
 
-Run these commands to verify everything is ready:
-
 ```bash
-python3.14 --version  # Should print Python 3.14.x
-python3.12 --version  # Should print Python 3.12.x (for SAM CLI)
-pip --version          # Should print pip 2x.x+
-git --version          # Should print git 2.x+
-aws --version          # Should print aws-cli/2.x.x
-docker --version       # Should print Docker 2x.x+
-sam --version          # Should print SAM CLI, version 1.x.x
+python3 --version   # 3.12+
+docker --version    # 20+
+aws --version       # 2.x
+sam --version       # 1.x
+git --version       # 2.x
 ```
-
-If all five print a version number, you are ready to proceed.
 
 ---
 
@@ -375,55 +236,24 @@ http://localhost:8051
 
 You should see the TempSensor dashboard with your sensors.
 
-### Step 5: Pre-Push Validation (Run Before Every Push)
-
-Run these checks locally to catch issues **before** they reach CI/CD. This saves time — a failed CI run takes 3-5 minutes to discover vs. seconds locally.
-
-> **Requirement:** Docker must be running for `sam-build`. The Lambda is deployed as a container image (via `Dockerfile.lambda`) — `sam build` runs `docker build` internally.
-
-**Recommended — use Make (single command):**
+### Step 5: Pre-Push Validation
 
 ```bash
 make validate
 ```
 
-This runs all checks in order: lint → test → SAM validate → Docker check → SAM build (container). If any step fails, it stops immediately.
+Runs: **lint → test → sam validate → sam build** (Docker image). All must pass before pushing.
 
-All Make targets:
+| Command | What it does |
+|---|---|
+| `make lint` | Code style (ruff) |
+| `make test` | Unit tests (pytest) |
+| `make sam-validate` | Validate SAM template syntax (needs SAM CLI + AWS region) |
+| `make sam-build` | Build Lambda container image (needs Docker running) |
+| `make validate` | All four in order |
+| `make run` | Start dashboard locally |
 
-| Command              | What it does                                      |
-|----------------------|---------------------------------------------------|
-| `make lint`          | Code style check (ruff)                           |
-| `make test`          | Unit tests (pytest)                               |
-| `make sam-validate`  | SAM template syntax check                         |
-| `make sam-build`     | Docker image build for Lambda (requires Docker)   |
-| `make validate`      | **All above, in order**                           |
-| `make install`       | Install production dependencies                   |
-| `make install-dev`   | Install production + dev dependencies             |
-| `make run`           | Start dashboard (gunicorn)                        |
-| `make run-debug`     | Start dashboard (debug mode)                      |
-
-**Manual (if you prefer running individually):**
-
-```bash
-cd dashboard
-
-# 1. Lint (code style)
-python -m ruff check app/ tests/
-
-# 2. Unit tests
-python -m pytest tests/ -v --tb=short
-
-# 3. SAM template validation
-sam validate --template-file ../infra/template.yaml
-
-# 4. SAM build — Docker image (requires Docker running)
-sam build --template-file ../infra/template.yaml
-```
-
-**All four must pass** before you push. These are the same checks CI/CD runs — validating locally avoids waiting for a remote failure.
-
-> **Why container image?** The dashboard's dependencies (pyarrow, pandas, numpy, plotly, dash) exceed Lambda's 250 MB ZIP limit. Container image Lambda supports up to 10 GB. `sam build` runs `docker build` using `dashboard/Dockerfile.lambda` (base: `public.ecr.aws/lambda/python:3.14`), and `sam deploy` pushes the image to ECR automatically.
+> **Why container image?** Dependencies (pyarrow, pandas, plotly, etc.) exceed Lambda's 250 MB ZIP limit. Container images support up to 10 GB. `sam build` runs `docker build` using `dashboard/Dockerfile.lambda` (base: `public.ecr.aws/lambda/python:3.14`).
 
 ### Data Source Switching
 
@@ -808,27 +638,13 @@ git push
 
 **File:** `.github/workflows/ci.yml`
 
-This workflow runs automatically on every Pull Request to `main` or `develop`. It also runs on pushes to `develop`.
-
-### What It Does (Step by Step)
+Runs on every PR to `main`/`develop` and on pushes to `develop`.
 
 ```
-Developer creates a Pull Request
-         │
-         ▼
-1. GitHub spins up a fresh Ubuntu machine (has Docker pre-installed)
-2. Checks out your code
-3. Installs Python 3.14 → runs lint (ruff) + unit tests (pytest)
-4. Switches to Python 3.12 → installs SAM CLI
-   (SAM CLI has a pydantic v1 bug under 3.13+)
-5. Runs sam validate — catches infrastructure template errors
-6. Runs sam build — builds Docker image from Dockerfile.lambda
-   (Python 3.14 base), catches dependency issues
-         │
-         ▼
-If ALL pass → Green checkmark ✓ on the PR
-If ANY fail → Red X on the PR (merge is blocked)
+PR created → Python 3.12 → pip install → ruff lint → pytest → Pass/Fail
 ```
+
+CI is intentionally simple — just lint + test. The Docker build happens in CD.
 
 ### How to Use It
 
@@ -898,27 +714,17 @@ This is useful for:
 - Re-deploying a server after config changes
 - Testing a deploy without tagging a release
 
-### What It Does (Step by Step)
+### What It Does
 
 ```
-1. Resolves targets:
-   - develop push    → ["dev"]
-   - main push       → ["staging"]
-   - v* tag          → ["prod-server1", "prod-server2", …]  (all prod servers)
-   - manual          → ["<selected target>"]
-
-2. Runs CI safety gate (once):
-   a. ruff check      — lint (code style)
-   b. pytest           — 161 unit tests
-
-3. For EACH target (parallel):
-   a. Authenticates to AWS using access keys (from that target's GitHub Environment secrets)
-   b. Runs "sam build"
-   c. Runs "sam deploy" using that target's section in samconfig.toml
-   d. Prints the deployed dashboard URL
+1. Resolves target (dev / staging / prod-server1)
+2. Installs SAM CLI (standalone installer — no Python needed)
+3. Authenticates to AWS (access keys from GitHub Environment secrets)
+4. Auto-deletes any ROLLBACK_COMPLETE stack (previous failed deploy)
+5. sam build → docker build (Dockerfile.lambda, Python 3.14 base)
+6. sam deploy → push image to ECR → update Lambda + API Gateway
+7. Prints dashboard URL
 ```
-
-> **Note:** `sam validate` runs in the CI pipeline (on PRs). The CD pipeline trusts that code merged to `develop`/`main` already passed CI.
 
 ### Deploying to Production (All Servers)
 
@@ -979,7 +785,6 @@ Developer writes code
   │ to develop       │             ┌──────────────────────┐
   └────────┬────────┘             │ 1. ruff (lint)       │
            │                       │ 2. pytest (161 tests)│
-           │                       │ 3. sam validate      │
            │                       └──────────┬───────────┘
            │                                  │
            │                       Pass? ──── Yes ──── ✓ Green check
@@ -1208,64 +1013,23 @@ aws lambda update-alias \
 
 ## Manual Deployment (Without CI/CD)
 
-If you want to deploy manually from your terminal without using GitHub Actions:
-
-### Step 1: Pre-Deploy Validation (Same as CI + Build Check)
-
-Before deploying anything, run the full local validation — lint, test, validate, AND build:
-
 ```bash
-cd TemperatureSensor/dashboard
+# 1. Validate
+make validate
 
-# 1a. Lint — checks code style (0 errors expected)
-python -m ruff check app/ tests/
-
-# 1b. Unit tests — catches bugs (158+ passed expected)
-python -m pytest tests/ -v --tb=short
-
-# 1c. Validate SAM template — catches infrastructure config errors
-sam validate --template-file ../infra/template.yaml
-
-# 1d. SAM build — Docker image (requires Docker running)
-sam build --template-file ../infra/template.yaml
-```
-
-Or simply run `make validate` from the project root (does all four).
-
-**Do NOT proceed to Step 2 unless all four pass.** If any fail, fix the issues first.
-
-> **Common build failures:**
-> - `Docker is not running` → start Docker Desktop (macOS/Windows) or `sudo systemctl start docker` (Linux)
-> - `No module named X` → dependency missing from `dashboard/requirements.txt`
-> - `unable to find handler` → check `ImageConfig.Command` in template.yaml matches the actual file/function
-
-### Step 2: Build
-
-This builds the Docker image for Lambda using `dashboard/Dockerfile.lambda`:
-
-```bash
-cd TemperatureSensor    # back to project root
+# 2. Build (Docker image for Lambda)
 sam build --template-file infra/template.yaml
-```
 
-You should see `Build Succeeded` at the end. The built image is stored locally for deploy.
-
-### Step 3: Deploy
-
-```bash
+# 3. Deploy
 sam deploy \
   --config-env dev \
   --config-file infra/samconfig.toml \
   --parameter-overrides "MysqlPassword=YOUR_DB_PASSWORD"
 ```
 
-Replace `dev` with `staging`, `prod-server1`, etc. as needed.
+Replace `dev` with `staging`, `prod-server1`, etc. and set the actual password.
 
-**What happens during deploy:**
-1. SAM uploads the Lambda package to S3
-2. Creates/updates a CloudFormation stack
-3. Creates: Lambda, API Gateway, DynamoDB table, Secrets Manager secret (DB creds), CloudWatch alarm
-4. Prints the outputs (dashboard URL, table name, secret ARN, etc.)
+**What happens:** SAM pushes the Docker image to ECR, creates/updates the CloudFormation stack (Lambda, API Gateway, DynamoDB, Secrets Manager, CloudWatch alarm), and prints the dashboard URL.
 
 ### Step 4: Verify the Deployment
 
@@ -1290,12 +1054,12 @@ All steps combined for easy copy-paste:
 ```bash
 cd TemperatureSensor
 
-# Pre-deploy checks (same as CI)
+# Pre-deploy checks
 cd dashboard
 python -m ruff check app/ tests/
 python -m pytest tests/ -v --tb=short
-sam validate --template-file ../infra/template.yaml
 cd ..
+sam validate --template-file infra/template.yaml --region us-east-1
 
 # Build + Deploy
 sam build --template-file infra/template.yaml
@@ -1331,12 +1095,10 @@ aws cloudformation describe-stacks \
 | **Lambda cold start slow** | First request after idle | Normal (~3-5s); subsequent requests fast |
 | **Alerts not appearing** | DynamoDB table missing | Check `ALERTS_TABLE`; locally, moto auto-creates it |
 | **Cookie expired** | 30-day timeout | Officer revisits `/connect/{token}` |
-| **CI fails on "sam validate"** | SAM CLI not installed, or running under Python 3.13+ | SAM CLI must run under Python 3.12. CI/CD handles this automatically. Locally: `python3.12 -m pip install aws-sam-cli` |
-| **"no validator found for pydantic.v1"** | SAM CLI running under Python 3.13+ | SAM CLI's pydantic v1 dependency is incompatible with Python 3.13+. Install SAM CLI under Python 3.12: `python3.12 -m pip install aws-sam-cli` |
-| **CD "sam build" fails: Binary validation** | Python version mismatch | Check `Dockerfile.lambda` base image matches the intended Python version. Run `make sam-build` locally to catch this |
-| **"Unzipped size must be smaller than 262144000 bytes"** | Using ZIP package instead of container image | Ensure `PackageType: Image` is set in template.yaml and `Dockerfile.lambda` exists. Container images bypass the 250 MB limit |
-| **"Docker is not running"** | Docker daemon not started | Start Docker Desktop (macOS/Windows) or `sudo systemctl start docker` (Linux) |
-| **SAM build slow first time** | Pulling Docker base image | First build downloads `public.ecr.aws/lambda/python:3.14` (~500 MB). Subsequent builds use the cached image and Docker layers |
+| **"Unzipped size must be smaller than 262144000 bytes"** | ZIP package, not container image | Ensure `PackageType: Image` in template.yaml and `Dockerfile.lambda` exists |
+| **ROLLBACK_COMPLETE stack** | Previous deploy failed | CD auto-deletes these. Manually: `aws cloudformation delete-stack --stack-name <name>` |
+| **Docker not running** | Docker daemon not started | Start Docker Desktop or `sudo systemctl start docker` |
+| **SAM build slow first time** | Pulling base image | First build downloads `python:3.14` Lambda image (~500 MB). Cached after that |
 | **CD "Waiting for review"** | Prod needs approval | Go to Actions → click "Review deployments" → Approve |
 | **CD "AccessDenied" error** | AWS keys invalid or missing permissions | Verify `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` in GitHub Secrets; check IAM user has `PowerUserAccess` + `IAMFullAccess` |
 
