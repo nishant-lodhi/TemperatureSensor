@@ -64,6 +64,16 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
 
+      - name: Ensure ECR repo exists
+        run: |
+          REPO=$(grep 'image_repositories' infra/samconfig.toml \
+            | grep -oP '(?<=/)[^"]+' | head -1 || true)
+          if [ -n "$REPO" ]; then
+            aws ecr describe-repositories --repository-names "$REPO" 2>/dev/null \
+              || aws ecr create-repository --repository-name "$REPO" \
+                   --image-scanning-configuration scanOnPush=true
+          fi
+
       - name: Delete failed stack if exists
         run: |
           STACK=$(grep -A2 '^\[${{ matrix.target }}\.deploy\.parameters\]' infra/samconfig.toml \
@@ -79,16 +89,22 @@ jobs:
       - name: SAM build
         run: sam build --template-file infra/template.yaml
 
+      - name: Inject secrets into samconfig
+        run: |
+          EXTRA=""
+          [ -n "${{ secrets.MYSQL_PASSWORD }}" ] && EXTRA="$EXTRA MysqlPassword=${{ secrets.MYSQL_PASSWORD }}"
+          [ -n "${{ secrets.COOKIE_SECRET }}" ]  && EXTRA="$EXTRA CookieSecret=${{ secrets.COOKIE_SECRET }}"
+          if [ -n "$EXTRA" ]; then
+            sed -i '/^\['"${{ matrix.target }}"'\.deploy\.parameters\]/,/^$\|^\[/{
+              s|^\(parameter_overrides *= *".*\)"|\1'"$EXTRA"'"|
+            }' infra/samconfig.toml
+          fi
+
       - name: SAM deploy
         run: |
-          OVERRIDES=""
-          [ -n "${{ secrets.MYSQL_PASSWORD }}" ] && OVERRIDES="$OVERRIDES MysqlPassword=${{ secrets.MYSQL_PASSWORD }}"
-          [ -n "${{ secrets.COOKIE_SECRET }}" ]  && OVERRIDES="$OVERRIDES CookieSecret=${{ secrets.COOKIE_SECRET }}"
-
           sam deploy \
             --config-env ${{ matrix.target }} \
             --config-file infra/samconfig.toml \
-            ${OVERRIDES:+--parameter-overrides $OVERRIDES} \
             --no-confirm-changeset \
             --no-fail-on-empty-changeset
 

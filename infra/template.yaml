@@ -58,10 +58,6 @@ Parameters:
   ParquetPrefix:
     Type: String
     Default: "sensor-data/"
-  NoteLambdaArn:
-    Type: String
-    Description: "ARN of Lambda to invoke for officer notes (optional)"
-    Default: ""
   ClientsYaml:
     Type: String
     Description: "Path to clients.yaml inside Lambda package (optional)"
@@ -70,7 +66,6 @@ Parameters:
 Conditions:
   GenerateCookieSecret: !Equals [!Ref CookieSecret, ""]
   HasParquetBucket: !Not [!Equals [!Ref ParquetBucket, ""]]
-  HasNoteLambda: !Not [!Equals [!Ref NoteLambdaArn, ""]]
   HasDbCreds: !Not [!Equals [!Ref MysqlHost, ""]]
 
 Globals:
@@ -141,6 +136,77 @@ Resources:
         - Key: DeploymentId
           Value: !Ref DeploymentId
 
+  # ── Note Lambda (lightweight — receives alert details from Dashboard) ──
+  NoteLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectPrefix}-NoteLambda-Role-${DeploymentId}-${Environment}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  NoteLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${ProjectPrefix}-NoteLambda-${DeploymentId}-${Environment}"
+      Runtime: python3.12
+      Handler: index.handler
+      Timeout: 30
+      MemorySize: 128
+      Role: !GetAtt NoteLambdaRole.Arn
+      Environment:
+        Variables:
+          ENVIRONMENT: !Ref Environment
+          DEPLOYMENT_ID: !Ref DeploymentId
+          PROJECT_PREFIX: !Ref ProjectPrefix
+      Code:
+        ZipFile: |
+          import json
+          import logging
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          def handler(event, context):
+              """Receives alert note details from the Dashboard Lambda.
+
+              Payload:
+                {
+                  "device_id": "AA:BB:CC:DD:EE:FF",
+                  "alert_type": "critical_high",
+                  "timestamp": "2026-03-13T18:30:00+00:00",
+                  "sensor_state": {
+                    "device_id": "AA:BB:CC:DD:EE:FF",
+                    "location": "01-Facility",
+                    "temp": 82.5,
+                    "battery": 95,
+                    "signal": -45,
+                    "status": "online",
+                    "last_seen": "2026-03-13T18:29:55+00:00",
+                    "readings": [...],
+                    "alerts": [...]
+                  }
+                }
+
+              Extend this function to: send email, create ticket, push to
+              Slack/Teams, write to external DB, etc.
+              """
+              logger.info("Alert note received: %s", json.dumps(event))
+                  return {"statusCode": 200, "body": "Note processed"}
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectPrefix
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: DeploymentId
+          Value: !Ref DeploymentId
+
   # ── API Gateway ─────────────────────────────────────────────────────────
   DashboardApi:
     Type: AWS::Serverless::HttpApi
@@ -165,7 +231,7 @@ Resources:
       ImageConfig:
         Command: ["lambda_handler.handler"]
       MemorySize: 512
-      Timeout: 30
+      Timeout: 60
       Environment:
         Variables:
           AWS_MODE: "true"
@@ -177,7 +243,7 @@ Resources:
           PARQUET_BUCKET: !Ref ParquetBucket
           PARQUET_PREFIX: !Ref ParquetPrefix
           ALERTS_TABLE: !Ref AlertsTable
-          NOTE_LAMBDA_ARN: !Ref NoteLambdaArn
+          NOTE_LAMBDA_ARN: !GetAtt NoteLambda.Arn
           CLIENTS_YAML: !Ref ClientsYaml
           PROJECT_PREFIX: !Ref ProjectPrefix
           COOKIE_SECRET: !If
@@ -204,14 +270,11 @@ Resources:
           - S3ReadPolicy:
               BucketName: !Ref ParquetBucket
           - !Ref AWS::NoValue
-        - !If
-          - HasNoteLambda
-          - Version: "2012-10-17"
-            Statement:
-              - Effect: Allow
-                Action: [lambda:InvokeFunction]
-                Resource: !Ref NoteLambdaArn
-          - !Ref AWS::NoValue
+        - Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Action: [lambda:InvokeFunction]
+              Resource: !GetAtt NoteLambda.Arn
       Events:
         CatchAll:
           Type: HttpApi
@@ -262,6 +325,9 @@ Outputs:
   DashboardFunctionName:
     Description: "Dashboard Lambda function name"
     Value: !Ref DashboardFunction
+  NoteLambdaArn:
+    Description: "Note Lambda ARN (receives alert details on Note click)"
+    Value: !GetAtt NoteLambda.Arn
   StackNamingPattern:
     Description: "Resource naming convention used"
     Value: !Sub "${ProjectPrefix}-{Resource}-${DeploymentId}-${Environment}"

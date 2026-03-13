@@ -9,8 +9,9 @@ from flask import Response, g, make_response, redirect, request
 
 from app import config as cfg
 
-_AUTH_SKIP = ("/connect/", "/disconnect", "/_dash-component-suites/",
-              "/_dash-dependencies", "/assets/", "/_reload-hash")
+_AUTH_SKIP = ("/connect/", "/disconnect", "/healthz",
+              "/_dash-component-suites/", "/_dash-dependencies",
+              "/assets/", "/_reload-hash")
 
 
 def register(server):

@@ -49,11 +49,13 @@ def load_token_map(deployment_id: Optional[str] = None) -> dict:
         import boto3
         sm = boto3.client("secretsmanager")
         token_map = {}
+        logger.info("Loading tokens: prefix=%s deploy_id=%s", prefix, deploy_id)
         paginator = sm.get_paginator("list_secrets")
         for page in paginator.paginate(Filters=[{"Key": "name", "Values": [prefix]}]):
             for entry in page.get("SecretList", []):
+                secret_name = entry["Name"]
                 try:
-                    resp = sm.get_secret_value(SecretId=entry["Name"])
+                    resp = sm.get_secret_value(SecretId=secret_name)
                     data = json.loads(resp["SecretString"])
                     token = data.get("access_token", "")
                     if token:
@@ -61,12 +63,14 @@ def load_token_map(deployment_id: Optional[str] = None) -> dict:
                             "client_id": data.get("client_id", ""),
                             "client_name": data.get("client_name", "Unknown"),
                         }
-                except Exception:
+                except Exception as inner_exc:
+                    logger.warning("Skipping secret %s: %s", secret_name, inner_exc)
                     continue
         _TOKEN_MAP = token_map
         _TOKEN_MAP_TS = now
+        logger.info("Token map loaded: %d client(s)", len(token_map))
     except Exception as exc:
-        logger.warning("Failed to load token map from Secrets Manager: %s", exc)
+        logger.error("Failed to load token map: %s", exc, exc_info=True)
 
     return _TOKEN_MAP
 
