@@ -45,9 +45,6 @@ jobs:
     name: CI Gate (lint + test)
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    defaults:
-      run:
-        working-directory: dashboard
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -58,12 +55,15 @@ jobs:
             dashboard/requirements.txt
             requirements-dev.txt
       - name: Install dependencies
+        working-directory: dashboard
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt -r ../requirements-dev.txt
       - name: Lint
+        working-directory: dashboard
         run: python -m ruff check app/ tests/
       - name: Test
+        working-directory: dashboard
         run: python -m pytest tests/ -v --tb=short
 
   # ── Determine which targets to deploy to ─────────────────────────────────
@@ -107,12 +107,10 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up Python 3.14
+      - name: Set up Python 3.12 (SAM CLI host)
         uses: actions/setup-python@v5
         with:
-          python-version: "3.14"
-          cache: "pip"
-          cache-dependency-path: dashboard/requirements.txt
+          python-version: "3.12"
 
       - name: Install SAM CLI
         run: pip install aws-sam-cli
@@ -124,7 +122,7 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
 
-      - name: SAM build (container)
+      - name: SAM build (container → Python 3.14)
         run: sam build --template-file infra/template.yaml --use-container
 
       - name: SAM deploy to ${{ matrix.target }}

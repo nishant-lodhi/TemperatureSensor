@@ -3,11 +3,9 @@
 # Purpose: Catch bugs BEFORE merging. If any step fails, the PR is blocked.
 #
 # What it does:
-#   1. Installs Python 3.14 and all dependencies
-#   2. Runs linter (ruff) to check code style
-#   3. Runs all unit tests
-#   4. Validates the SAM CloudFormation template
-#   5. Container-based SAM build (matches Lambda runtime exactly)
+#   1. Lint + Test under Python 3.14 (matches Lambda runtime)
+#   2. SAM validate + build under Python 3.12 (SAM CLI has pydantic v1
+#      incompatibility with 3.14). Container build still targets 3.14.
 # ─────────────────────────────────────────────────────────────────────────────
 
 name: CI — Lint, Test, Validate
@@ -28,15 +26,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
-    defaults:
-      run:
-        working-directory: dashboard
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up Python 3.14
+      # ── App code checks (Python 3.14) ────────────────────────────────────
+      - name: Set up Python 3.14 (app runtime)
         uses: actions/setup-python@v5
         with:
           python-version: "3.14"
@@ -45,21 +40,31 @@ jobs:
             dashboard/requirements.txt
             requirements-dev.txt
 
-      - name: Install dependencies
+      - name: Install app dependencies
+        working-directory: dashboard
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt -r ../requirements-dev.txt
 
       - name: Lint (ruff)
+        working-directory: dashboard
         run: python -m ruff check app/ tests/
 
       - name: Unit tests (pytest)
+        working-directory: dashboard
         run: python -m pytest tests/ -v --tb=short
 
-      - name: Validate SAM template
-        run: |
-          pip install aws-sam-cli
-          sam validate --template-file ../infra/template.yaml --lint
+      # ── SAM CLI checks (Python 3.12 — SAM CLI incompatible with 3.14) ───
+      - name: Set up Python 3.12 (SAM CLI host)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
 
-      - name: SAM build (container)
-        run: sam build --template-file ../infra/template.yaml --use-container
+      - name: Install SAM CLI
+        run: pip install aws-sam-cli
+
+      - name: Validate SAM template
+        run: sam validate --template-file infra/template.yaml --lint
+
+      - name: SAM build (container → Python 3.14)
+        run: sam build --template-file infra/template.yaml --use-container

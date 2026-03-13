@@ -68,13 +68,13 @@ A serverless dashboard that monitors temperature sensors in correctional facilit
 
 Before starting, you need these tools on your computer. Follow each step exactly.
 
-### 1. Python 3.14
+### 1. Python 3.14 (App Runtime)
 
-Python is the programming language the dashboard is written in. The Lambda runtime uses Python 3.14, so your local version must match.
+Python is the programming language the dashboard is written in. The Lambda runtime uses Python 3.14, so your local version must match for running lint and tests.
 
 **Check if already installed:**
 ```bash
-python3 --version
+python3.14 --version
 ```
 If it prints `Python 3.14.x`, skip to the next tool.
 
@@ -93,7 +93,36 @@ brew install python@3.14
 **Install on Windows:**
 Download from https://www.python.org/downloads/ — during install, check "Add Python to PATH".
 
-### 2. pip (Python Package Manager)
+### 2. Python 3.12 (SAM CLI Host)
+
+SAM CLI has a known incompatibility with Python 3.13+ (pydantic v1 validator issue). You need **Python 3.12** installed alongside 3.14 to run SAM commands (`sam validate`, `sam build`).
+
+> **Note:** This only affects the SAM CLI tool itself. Your Lambda still runs Python 3.14 — the `--use-container` flag builds inside a Python 3.14 Docker image regardless of the host Python.
+
+**Check if already installed:**
+```bash
+python3.12 --version
+```
+
+**Install on Ubuntu/Debian (Linux):**
+```bash
+sudo apt install -y python3.12 python3.12-venv
+```
+
+**Install on macOS:**
+```bash
+brew install python@3.12
+```
+
+**Install on Windows:**
+Download Python 3.12 from https://www.python.org/downloads/release/ — install alongside 3.14.
+
+**Install SAM CLI under Python 3.12:**
+```bash
+python3.12 -m pip install aws-sam-cli
+```
+
+### 3. pip
 
 pip installs Python libraries. It usually comes with Python.
 
@@ -102,7 +131,7 @@ pip installs Python libraries. It usually comes with Python.
 python3 -m pip install --upgrade pip
 ```
 
-### 3. Git
+### 4. Git
 
 Git tracks code changes and is used to push code to GitHub.
 
@@ -124,7 +153,7 @@ brew install git
 **Install on Windows:**
 Download from https://git-scm.com/downloads
 
-### 4. AWS CLI v2
+### 5. AWS CLI v2
 
 The AWS CLI lets you talk to AWS from your terminal. Needed for deployments.
 
@@ -164,7 +193,7 @@ It will ask for:
 
 > **Note**: If you are only doing local development (no AWS deployment), you do NOT need AWS CLI.
 
-### 5. Docker
+### 6. Docker
 
 Docker is required for container-based SAM builds. The `sam build --use-container` command pulls a Docker image matching the Lambda Python 3.14 runtime and compiles all dependencies inside it — this guarantees binary compatibility with Lambda (no more wheel/build failures).
 
@@ -194,13 +223,13 @@ docker info
 ```
 If this errors, start Docker Desktop (macOS/Windows) or run `sudo systemctl start docker` (Linux).
 
-### 6. AWS SAM CLI
+### 7. AWS SAM CLI
 
-SAM CLI packages and deploys your code to AWS Lambda.
+SAM CLI packages and deploys your code to AWS Lambda. **Must be installed under Python 3.12** (not 3.14) due to the pydantic compatibility issue.
 
 **Install:**
 ```bash
-pip install aws-sam-cli
+python3.12 -m pip install aws-sam-cli
 ```
 
 **Verify:**
@@ -209,7 +238,7 @@ sam --version
 ```
 You should see something like `SAM CLI, version 1.x.x`.
 
-### 7. GitHub Account
+### 8. GitHub Account
 
 You need a GitHub account to store code and run the CI/CD pipelines.
 
@@ -220,11 +249,13 @@ Sign up at https://github.com if you do not have one.
 Run these commands to verify everything is ready:
 
 ```bash
-python3 --version    # Should print 3.10+
-pip --version        # Should print pip 2x.x+
-git --version        # Should print git 2.x+
-aws --version        # Should print aws-cli/2.x.x
-sam --version        # Should print SAM CLI, version 1.x.x
+python3.14 --version  # Should print Python 3.14.x
+python3.12 --version  # Should print Python 3.12.x (for SAM CLI)
+pip --version          # Should print pip 2x.x+
+git --version          # Should print git 2.x+
+aws --version          # Should print aws-cli/2.x.x
+docker --version       # Should print Docker 2x.x+
+sam --version          # Should print SAM CLI, version 1.x.x
 ```
 
 If all five print a version number, you are ready to proceed.
@@ -787,12 +818,11 @@ Developer creates a Pull Request
          ▼
 1. GitHub spins up a fresh Ubuntu machine (has Docker pre-installed)
 2. Checks out your code
-3. Installs Python 3.14
-4. Installs all pip dependencies
-5. Runs ruff (linter) — catches style errors
-6. Runs pytest (unit tests) — catches bugs
-7. Runs sam validate — catches infrastructure template errors
-8. Runs sam build --use-container — builds inside Lambda-compatible
+3. Installs Python 3.14 → runs lint (ruff) + unit tests (pytest)
+4. Switches to Python 3.12 → installs SAM CLI
+   (SAM CLI has a pydantic v1 bug under 3.13+)
+5. Runs sam validate — catches infrastructure template errors
+6. Runs sam build --use-container — builds inside Python 3.14
    Docker image, catches dependency/binary issues
          │
          ▼
@@ -1301,8 +1331,9 @@ aws cloudformation describe-stacks \
 | **Lambda cold start slow** | First request after idle | Normal (~3-5s); subsequent requests fast |
 | **Alerts not appearing** | DynamoDB table missing | Check `ALERTS_TABLE`; locally, moto auto-creates it |
 | **Cookie expired** | 30-day timeout | Officer revisits `/connect/{token}` |
-| **CI fails on "sam validate"** | SAM CLI not installed | The CI workflow installs it; check pip step |
-| **CD "sam build" fails: Binary validation** | Python version mismatch | Template `Runtime` must be `python3.14`. Both CI/CD and local use `--use-container` so Docker handles the build. Run `make sam-build` locally first to catch this |
+| **CI fails on "sam validate"** | SAM CLI not installed, or running under Python 3.13+ | SAM CLI must run under Python 3.12. CI/CD handles this automatically. Locally: `python3.12 -m pip install aws-sam-cli` |
+| **"no validator found for pydantic.v1"** | SAM CLI running under Python 3.13+ | SAM CLI's pydantic v1 dependency is incompatible with Python 3.13+. Install SAM CLI under Python 3.12: `python3.12 -m pip install aws-sam-cli` |
+| **CD "sam build" fails: Binary validation** | Python version mismatch | Template `Runtime` must be `python3.14`. CI/CD uses `--use-container` so Docker handles the build. Run `make sam-build` locally to catch this |
 | **"Docker is not running"** | Docker daemon not started | Start Docker Desktop (macOS/Windows) or `sudo systemctl start docker` (Linux) |
 | **SAM build slow first time** | Pulling Docker image | First `--use-container` build downloads the `build-python3.14` image (~1 GB). Subsequent builds use the cached image |
 | **CD "Waiting for review"** | Prod needs approval | Go to Actions → click "Review deployments" → Approve |
