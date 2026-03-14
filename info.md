@@ -321,65 +321,138 @@ The master function that assembles a complete sensor state dict from raw data:
 
 **File**: `dashboard/app/data/alert_manager.py` (250 lines)
 
-### Lifecycle
+### Lifecycle (State Machine)
 
 ```
-Condition triggers → ACTIVE
-                       │
-              ┌────────┼────────┐
-              ▼        ▼        ▼
-         [auto-clear]  [Remove]  [Note]
-              │        │        │
-              ▼        ▼        ▼
-          RESOLVED  DISMISSED  Lambda X → DISMISSED
-              │        │        │
-              └────────┴────────┘
-                       │
-                  Alert History
-                  (DynamoDB, 90-day TTL)
+Reading crosses threshold
+        │
+        ▼
+    ┌────────┐     Condition clears     ┌──────────┐
+    │ ACTIVE │ ──────(auto)──────────▶  │ RESOLVED │
+    └────────┘                          └──────────┘
+        │                                     │
+        ├── Officer clicks "✕ Remove"         │
+        │         ▼                           │
+        │   ┌───────────┐                    │
+        │   │ DISMISSED  │ ◀── 5-min ────────│
+        │   │ (cooldown) │     cooldown       │
+        │   └───────────┘     starts          │
+        │                                     │
+        ├── Officer clicks "📋 Note"          │
+        │         ▼                           │
+        │   Lambda X invoked                  │
+        │   (sends full context)              │
+        │         ▼                           │
+        │   Auto-DISMISSED                    │
+        │   (cooldown starts)                 │
+        │                                     │
+        └─────────────────────────────────────┘
+                         │
+                         ▼
+              DynamoDB History (90-day TTL)
 ```
 
-### Evaluation
+### Trigger Timing
 
-Every 15 seconds, `evaluate(sensor_states, now_dt)` runs through all sensor states and checks 6 conditions.
-The `now_dt` parameter receives the DB-local time from `hybrid_provider._db_now()` so that
-all alert timestamps (`triggered_at`, `resolved_at`) are in the same timezone as the sensor data.
+The `state_pump` callback fires every **15 seconds** (`REFRESH_MONITOR_MS = 15000`).
+On each tick:
+1. `hybrid_provider.get_live_alerts()` is called
+2. Which internally calls `get_all_sensor_states()` to get the latest per-sensor reading
+3. Then calls `alert_manager.evaluate(states, now_dt=db_now)` — passing DB-local time
+
+So alerts are evaluated **every 15 seconds**, using sensor data that is cached for 15s.
+
+### 6 Alert Conditions
+
+Each condition is a lambda function checked against every sensor's state dict:
+
+| # | Alert Type | Severity | Condition | Threshold Values | When It Fires |
+|---|---|---|---|---|---|
+| 1 | `EXTREME_TEMPERATURE` | **CRITICAL** | `temp > 95°F` | `TEMP_CRITICAL_HIGH = 95.0` | Sensor reads 95.1°F or above |
+| 2 | `EXTREME_TEMPERATURE_LOW` | **CRITICAL** | `temp < 50°F` | `TEMP_CRITICAL_LOW = 50.0` | Sensor reads 49.9°F or below |
+| 3 | `SUSTAINED_HIGH` | **HIGH** | `85°F < temp ≤ 95°F` | Between `TEMP_HIGH` and `TEMP_CRITICAL_HIGH` | Sensor reads 85.1°F to 95.0°F |
+| 4 | `LOW_TEMPERATURE` | **MEDIUM** | `50°F ≤ temp < 65°F` | Between `TEMP_CRITICAL_LOW` and `TEMP_LOW` | Sensor reads 50.0°F to 64.9°F |
+| 5 | `SENSOR_OFFLINE` | **HIGH** | `status == "offline"` | `ALERT_OFFLINE_THRESHOLD_SEC = 300` | No reading for > 5 minutes |
+| 6 | `RAPID_CHANGE` | **MEDIUM** | `|rate_of_change| > 4.0` | 4.0°F in 10-minute window | Sudden spike or drop |
+
+**Chart threshold mapping** (what the officer sees on the graph):
+
+```
+  ─── 95°F ─── Critical High (dashed red)     ← alert #1 triggers above
+  ─── 85°F ─── Too Hot (dotted red)            ← alert #3 triggers above
+       ↕ SAFE ZONE (green shading)             ← no alerts
+  ─── 65°F ─── Too Cold (dotted teal)          ← alert #4 triggers below
+  ─── 50°F ─── Critical Low (dashed blue)      ← alert #2 triggers below
+```
+
+### Per-Tick Evaluation Logic
+
+For **each sensor** × **each of the 6 conditions**, every 15 seconds:
 
 ```python
-ALERT_CONDITIONS = [
-    ("EXTREME_TEMPERATURE",     "CRITICAL", temp > critical_high),
-    ("EXTREME_TEMPERATURE_LOW", "CRITICAL", temp < critical_low),
-    ("SUSTAINED_HIGH",          "HIGH",     critical_high >= temp > temp_high),
-    ("LOW_TEMPERATURE",         "MEDIUM",   critical_low <= temp < temp_low),
-    ("SENSOR_OFFLINE",          "HIGH",     status == "offline"),
-    ("RAPID_CHANGE",            "MEDIUM",   |rate_of_change| > 4.0),
-]
+pk = "ALERT#{device_id}#{alert_type}"   # unique key per sensor+condition
+
+if condition_is_triggered:
+    if pk NOT in memory (no existing alert):
+        if NOT in cooldown:
+            → _create_alert()       # write to DynamoDB + in-memory
+        else:
+            → skip (cooldown active — prevents alert spam)
+    else:
+        → do nothing (alert already ACTIVE — no duplicate)
+
+if condition_is_NOT_triggered:
+    if pk IS in memory AND state == "ACTIVE":
+        → _resolve_alert()          # auto-resolve, remove from live
 ```
 
-For each (sensor, condition) pair:
-- **If triggered and no existing alert**: create new alert in memory + DynamoDB
-- **If triggered but in cooldown**: skip (prevents alert spam after dismiss)
-- **If NOT triggered but alert exists**: auto-resolve (move to RESOLVED state)
+**Example walkthrough**: Sensor reads 96°F at tick T1:
+1. `EXTREME_TEMPERATURE` condition: `96 > 95` → True → creates CRITICAL alert
+2. `SUSTAINED_HIGH` condition: `85 < 96 ≤ 95` → False (96 > 95) → no alert
+3. Only one of #1 or #3 fires — they are mutually exclusive by range
 
-### Timestamp Consistency
+At tick T2 (15s later), sensor reads 88°F:
+1. `EXTREME_TEMPERATURE`: `88 > 95` → False → **auto-resolves** the CRITICAL alert
+2. `SUSTAINED_HIGH`: `85 < 88 ≤ 95` → True → creates HIGH alert
+3. Officer sees the CRITICAL disappear and HIGH appear — no manual action needed
 
-All alert timestamps use the same timezone as sensor data:
-- `triggered_at`: from `now_dt` parameter (DB local time)
-- `resolved_at`: `datetime.now().isoformat()` (naive local, matching DB timezone)
-- `dismissed_at`: same as `resolved_at`
-
-This ensures alert timestamps displayed on the chart align with reading timestamps.
+At tick T3, sensor reads 80°F (back in safe zone):
+1. `SUSTAINED_HIGH`: `85 < 80` → False → **auto-resolves** the HIGH alert
+2. All alerts gone — dashboard shows green
 
 ### Deduplication
 
 Each alert has a primary key: `ALERT#{device_id}#{alert_type}`. Only one alert per
-(device, type) can exist at a time. This prevents duplicate alerts for the same condition.
+(sensor, type) can exist at a time. If sensor `AA:BB:CC` already has an active
+`EXTREME_TEMPERATURE` alert, the next evaluation tick won't create a duplicate.
 
-### Cooldown
+### Cooldown (Anti-Spam)
 
-When an officer dismisses an alert, a cooldown timestamp is recorded.
-For `ALERT_COOLDOWN_SEC` (300s = 5 min), the same alert type on the same sensor
-won't re-trigger, giving time for corrective action.
+When an officer dismisses an alert:
+1. `_cooldowns[pk] = time.time()` records the dismiss time
+2. For the next **300 seconds (5 min)**, `_in_cooldown(pk)` returns `True`
+3. Even if the condition is still triggered, a new alert won't be created
+4. After 5 minutes, if the condition persists, the alert re-fires
+
+This gives the facility officer time to take corrective action (open a vent, adjust HVAC)
+without the same alert reappearing immediately.
+
+### Cold-Start Recovery
+
+When Lambda cold starts (first request after deploy or idle):
+1. `AlertManager.__init__()` calls `_load_active()`
+2. `_load_active()` queries the `ClientActiveAlerts` DynamoDB GSI for all `ACTIVE#*` entries
+3. These are loaded into the `_memory` dict
+4. So active alerts **survive Lambda restarts** — they don't disappear and reappear
+
+### Timestamp Consistency
+
+All alert timestamps use the same timezone as sensor data:
+- `triggered_at`: from `now_dt` parameter (DB local time via `_db_now()`)
+- `resolved_at`: `datetime.now().isoformat()` (naive local)
+- `dismissed_at`: same as `resolved_at`
+
+This ensures alert diamond markers on the chart align with the reading timeline.
 
 ### DynamoDB Schema
 
@@ -388,8 +461,8 @@ PK: ALERT#{device_id}#{alert_type}     (partition key)
 SK: {ISO timestamp}                     (sort key)
 GSI: ClientActiveAlerts
   - client_id (partition)
-  - state_triggered (sort, e.g. "ACTIVE#2026-03-12T...")
-TTL: 90 days from creation
+  - state_triggered (sort, e.g. "ACTIVE#2026-03-12T14:30:00")
+TTL: 90 days from creation (auto-deleted by DynamoDB)
 ```
 
 ### Local Mode
@@ -400,12 +473,25 @@ exercises the full DynamoDB lifecycle including GSI queries.
 
 ### Officer Actions
 
-**Note** (Critical/High only): sends the full alert context (device ID, type, sensor state,
+Only **CRITICAL** and **HIGH** severity alerts show action buttons on the UI.
+MEDIUM alerts auto-resolve when the condition clears — no officer intervention.
+
+**"📋 Note"**: sends the full alert context (device ID, type, sensor state,
 timestamp) to a Lambda function (`NOTE_LAMBDA_ARN`), then auto-dismisses the alert.
 On the UI, a green checkmark appears briefly.
 
-**Remove**: dismisses the alert from the live screen, starts cooldown. The alert is
+**"✕ Remove"**: dismisses the alert from the live screen, starts 5-min cooldown. The alert is
 preserved in DynamoDB with state `DISMISSED`.
+
+### Alert History (UI Table)
+
+The alert history table at the bottom of the dashboard shows all alerts (active + resolved +
+dismissed) for the **selected sensor**, pulled from three sources:
+1. In-memory `_resolved` list (recent resolutions not yet queried from DB)
+2. DynamoDB GSI query (up to 200 items)
+3. Current `_memory` dict (active alerts)
+
+Merged by PK+SK, sorted by `triggered_at` descending, capped at 100 entries.
 
 ---
 
@@ -507,18 +593,91 @@ The `render_kpis` callback displays 8 information cards for the selected sensor:
 
 An anomaly alert box appears when `anomaly=True` with the anomaly reason.
 
-### Compliance Calculation
+### Live Compliance — Detailed Breakdown
 
-The `render_compliance` callback uses **total sensors** as the denominator, not just online ones:
+**File**: `monitor.py` → `render_compliance()` callback
 
-1. Filter by facility if location filter active
-2. Separate `online` and `offline` lists
-3. Count In Range, Too Hot, Too Cold from online sensors
-4. `pct = in_range / total * 100` — offline sensors reduce the compliance score
-5. Count offline sensors separately
-6. Display gauge + stats + 7-day trend (with missing dates filled to 0%)
+**Trigger**: runs whenever `store-states`, `store-compliance`, or `filter-location` changes.
+In practice: every 15 seconds (from `state_pump`) and on facility filter change.
 
-**Example**: 3 sensors total, 1 in-range, 2 offline → compliance = 33.3% (not 100%).
+#### Step-by-Step Calculation
+
+```python
+# 1. Filter by facility (if location filter is active)
+if location_filter:
+    states = [s for s in states if s["location"] == location_filter]
+
+# 2. Classify sensors
+total    = len(states)                                          # ALL sensors in scope
+online   = [s for s in states if s["status"] != "offline"]      # status = online or degraded
+offline  = total - len(online)                                  # status = offline
+
+# 3. Temperature classification (online sensors only)
+online_temps = [s["temperature"] for s in online]
+in_range = count where TEMP_LOW (65) <= temp <= TEMP_HIGH (85)  # safe zone
+too_hot  = count where temp > TEMP_HIGH (85)                    # above normal
+too_cold = count where temp < TEMP_LOW (65)                     # below normal
+issue    = too_hot + too_cold                                   # total out-of-range
+
+# 4. Compliance percentage (total sensors as denominator)
+pct = in_range / total * 100
+```
+
+#### What Each Stat Means
+
+| Stat | Value Source | What It Shows | Color Logic |
+|---|---|---|---|
+| **Total** | `len(states)` — all sensors in scope | Total sensor count (after facility filter if any) | Always neutral gray |
+| **In Range** | Online sensors with `65 ≤ temp ≤ 85` | Sensors within the safe zone | Green |
+| **Issue** | `too_hot + too_cold` | Total online sensors with out-of-range temp | Amber if > 0, green if 0 |
+| **Too Hot** | Online sensors with `temp > 85` | Overheating sensors | Red if > 0, green if 0 |
+| **Too Cold** | Online sensors with `temp < 65` | Freezing sensors | Teal if > 0, green if 0 |
+| **Offline** | `total - len(online)` | Sensors not reporting for > 5 min | Gray if > 0, green if 0 |
+
+#### Why Total (Not Just Online) as Denominator
+
+Offline sensors **reduce** the compliance percentage because they are non-compliant
+(you can't know if their temperature is safe). This is an intentional design choice:
+
+| Scenario | Total | Online | In Range | Compliance |
+|---|---|---|---|---|
+| 3 sensors, all in range | 3 | 3 | 3 | **100.0%** |
+| 3 sensors, 1 hot, 2 in range | 3 | 3 | 2 | **66.7%** |
+| 3 sensors, 2 offline, 1 in range | 3 | 1 | 1 | **33.3%** (not 100%) |
+| 3 sensors, all offline | 3 | 0 | 0 | **0.0%** (shows "Last Known") |
+| 10 sensors, 7 in range, 1 hot, 2 offline | 10 | 8 | 7 | **70.0%** |
+
+The rationale: if 2 out of 3 sensors are offline, the facility has a monitoring problem
+even if the one working sensor reads 72°F. Compliance should reflect operational health,
+not just the data that happens to be available.
+
+#### Filter-Aware Behavior
+
+When a facility filter is applied:
+- Only sensors from that facility are counted
+- The gauge label changes: "Live Compliance — 01-Facility" instead of "Live Compliance — All Facilities"
+- Stats (Total, In Range, etc.) reflect only that facility
+- If all filtered sensors are offline: label becomes "Last Known — 01-Facility"
+
+#### 7-Day Compliance Trend
+
+The trend chart below the gauge shows daily compliance percentages from the past 7 days.
+Data comes from `hybrid_provider.get_compliance_history()` which:
+1. Queries MySQL: `GROUP BY DATE(date_added)` with `SUM(CASE WHEN temp BETWEEN 65 AND 85)` / count
+2. Deduplicates (keeps first entry per date)
+3. Fills missing dates with 0% (no gaps in the chart)
+4. Caches for 60s
+
+Each day's dot is color-coded: green (≥ 95% target), amber (50–95%), red (< 50%).
+A dotted horizontal line marks the 95% compliance target.
+
+#### Compliance Gauge
+
+The semi-circular gauge from `charts.py → compliance_gauge()`:
+- Green zone: target% to 100%
+- Red zone: 0% to target%
+- Needle shows current compliance %
+- Threshold marker at `COMPLIANCE_TARGET` (95%)
 
 ### Time-Formatting Helper
 

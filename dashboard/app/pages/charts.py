@@ -5,7 +5,6 @@ Every function takes data + config, returns a go.Figure. No DB calls.
 
 from __future__ import annotations
 
-import numpy as np
 import plotly.graph_objects as go
 
 from app import config as cfg
@@ -126,11 +125,7 @@ def unified_chart(
             line=dict(color=cfg.COLORS["accent"], width=2.5, dash="dot"),
         ))
 
-    if h_t:
-        arr = np.array(h_t, dtype=float)
-        hi, lo = float(np.max(arr)), float(np.min(arr))
-        _add_threshold_lines(fig, hi, lo)
-
+    _add_alert_thresholds(fig)
     _add_safe_thresholds(fig)
 
     if not h_ts and x_since and x_until:
@@ -154,19 +149,20 @@ def unified_chart(
     return fig
 
 
-def _add_threshold_lines(fig, hi, lo):
+def _add_alert_thresholds(fig):
+    """Critical threshold lines — readings crossing these trigger CRITICAL alerts."""
     fig.add_hline(
-        y=hi, line_dash="dash", line_color="rgba(220,38,38,0.25)",
-        line_width=1,
-        annotation_text=f"High: {hi:.1f}°F",
-        annotation_font_color=cfg.COLORS["danger"],
+        y=cfg.TEMP_CRITICAL_HIGH, line_dash="dash",
+        line_color="rgba(220,38,38,0.35)", line_width=1.5,
+        annotation_text=f"Critical High {cfg.TEMP_CRITICAL_HIGH:.0f}°F",
+        annotation_font_color=cfg.COLORS["critical"],
         annotation_font_size=9, annotation_position="top right",
     )
     fig.add_hline(
-        y=lo, line_dash="dash", line_color="rgba(13,148,136,0.25)",
-        line_width=1,
-        annotation_text=f"Low: {lo:.1f}°F",
-        annotation_font_color=cfg.COLORS["primary"],
+        y=cfg.TEMP_CRITICAL_LOW, line_dash="dash",
+        line_color="rgba(59,130,246,0.35)", line_width=1.5,
+        annotation_text=f"Critical Low {cfg.TEMP_CRITICAL_LOW:.0f}°F",
+        annotation_font_color="#3b82f6",
         annotation_font_size=9, annotation_position="bottom right",
     )
 
