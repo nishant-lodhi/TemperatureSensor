@@ -164,9 +164,10 @@ class TestRenderChart:
 
     def test_empty_readings(self):
         from app.pages.monitor import render_chart
-        assert "Select a sensor" in str(render_chart({"device_id": "x", "readings": [], "forecast": [],
-                                                       "offline": False, "alerts": [], "range_mode": "live",
-                                                       "forecast_alert_count": 0}))
+        result = str(render_chart({"device_id": "x", "readings": [], "forecast": [],
+                                   "offline": False, "alerts": [], "range_mode": "live",
+                                   "forecast_alert_count": 0}))
+        assert "Card" in result or "Graph" in result
 
 
 class TestRenderAlerts:

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Optional
 
 from app import config as cfg
@@ -49,12 +49,25 @@ class HybridProvider:
         self._locations_ts: float = 0
         self._compliance_cache: dict = {"data": None, "ts": 0, "ttl": cfg.CACHE_TTL_COMPLIANCE}
         self._alerts_cache: dict = {"data": None, "ts": 0, "ttl": cfg.CACHE_TTL_ALERTS}
+        self._last_reading_tracker: dict[str, dict] = {}
 
     # ── helpers ──────────────────────────────────────────────────────────────
 
     def _cid(self) -> str | None:
         """Return client_id for SQL filtering (None when default/local = no filter)."""
         return self._client_id if self._client_id and self._client_id != "default" else None
+
+    def _db_now(self) -> datetime:
+        """Get current time from DB server — avoids timezone mismatch."""
+        if self._use_mysql():
+            from app.data import mysql_reader as db
+            try:
+                db_time = db.fetch_db_now()
+                if db_time:
+                    return db_time
+            except Exception:
+                pass
+        return datetime.now()
 
     def _use_parquet(self) -> bool:
         return self._data_source in ("parquet", "hybrid") and bool(self._pq_bucket)
@@ -119,7 +132,7 @@ class HybridProvider:
 
         from app.data import mysql_reader as db
 
-        now = datetime.now(timezone.utc)
+        db_now = self._db_now()
         latest_rows = db.fetch_latest_per_sensor(self._cid())
         if not latest_rows:
             self._cache.update(states=[], ts=now_ts)
@@ -129,7 +142,7 @@ class HybridProvider:
         mac_list = [r["mac"] for r in latest_rows]
         earliest = min(
             (r["date_added"] for r in latest_rows if isinstance(r["date_added"], datetime)),
-            default=now,
+            default=db_now,
         ) - timedelta(hours=1)
         hist = db.fetch_batch_history(mac_list, earliest, self._cid())
 
@@ -137,7 +150,7 @@ class HybridProvider:
         for row in latest_rows:
             loc = loc_map.get(row.get("tags_id"), {})
             s = analytics.build_sensor_state(
-                row, hist.get(row["mac"], []), now, self._thresholds, self._client_id, loc,
+                row, hist.get(row["mac"], []), db_now, self._thresholds, self._client_id, loc,
             )
             if s:
                 states.append(s)
@@ -147,10 +160,16 @@ class HybridProvider:
 
     # ── readings (Parquet → MySQL) ──────────────────────────────────────────
 
+    def get_db_time(self) -> datetime:
+        """Expose DB time for callers that need correct anchoring."""
+        return self._db_now()
+
     def get_readings(self, device_id: str, since_iso: str, until_iso: str | None = None) -> list[dict]:
-        since = datetime.fromisoformat(since_iso.replace("Z", "+00:00"))
-        now = datetime.now(timezone.utc)
-        until = datetime.fromisoformat(until_iso.replace("Z", "+00:00")) if until_iso else now
+        since = datetime.fromisoformat(since_iso.replace("Z", ""))
+        if until_iso:
+            until = datetime.fromisoformat(until_iso.replace("Z", ""))
+        else:
+            until = self._db_now()
 
         cache_key = f"{device_id}|{since_iso}|{until_iso or 'now'}"
         cached = self._readings_cache.get(cache_key)
@@ -182,7 +201,7 @@ class HybridProvider:
             except (ValueError, TypeError):
                 continue
             ts = r["date_added"]
-            ts_str = ts.replace(tzinfo=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") if isinstance(ts, datetime) else str(ts)
+            ts_str = ts.strftime("%Y-%m-%dT%H:%M:%S") if isinstance(ts, datetime) else str(ts)
             out.append({"timestamp": ts_str, "temperature": temp})
         return out
 
@@ -191,12 +210,9 @@ class HybridProvider:
     def get_forecast(self, device_id: str, horizon: str) -> dict | None:
         from app.data import mysql_reader as db
         ref = db.fetch_max_date(device_id, client_id=self._cid())
-        if not ref:
+        if not ref or not isinstance(ref, datetime):
             return None
-        ref_utc = ref.replace(tzinfo=timezone.utc) if isinstance(ref, datetime) else None
-        if not ref_utc:
-            return None
-        readings = self.get_readings(device_id, (ref_utc - timedelta(minutes=30)).isoformat())
+        readings = self.get_readings(device_id, (ref - timedelta(minutes=30)).strftime("%Y-%m-%dT%H:%M:%S"))
         params = analytics.forecast_params(readings)
         if not params:
             return None
@@ -208,8 +224,8 @@ class HybridProvider:
             return []
         from app.data import mysql_reader as db
         ref = db.fetch_max_date(device_id, client_id=self._cid())
-        ref_utc = ref.replace(tzinfo=timezone.utc) if isinstance(ref, datetime) and ref else datetime.now(timezone.utc)
-        return analytics.forecast_series(fc["model_params"], ref_utc, steps)
+        ref_dt = ref if isinstance(ref, datetime) else self._db_now()
+        return analytics.forecast_series(fc["model_params"], ref_dt, steps)
 
     # ── compliance (Parquet for past days, MySQL for today) ─────────────────
 
@@ -219,20 +235,20 @@ class HybridProvider:
         if cc["data"] is not None and (now_ts - cc["ts"]) < cc["ttl"]:
             return cc["data"]
 
-        now = datetime.now(timezone.utc)
-        start = now - timedelta(days=days)
+        db_now = self._db_now()
+        start = db_now - timedelta(days=days)
 
         history: list[dict] = []
         if self._use_parquet():
             from app.data import parquet_reader as pq
             history = pq.compliance_for_range(
-                self._pq_bucket, self._pq_prefix, start, now, cfg.TEMP_LOW, cfg.TEMP_HIGH,
+                self._pq_bucket, self._pq_prefix, start, db_now, cfg.TEMP_LOW, cfg.TEMP_HIGH,
             )
 
         if not history and self._use_mysql():
             from app.data import mysql_reader as db
             rows = db.fetch_compliance_batch(
-                start.strftime("%Y-%m-%d 00:00:00"), now.strftime("%Y-%m-%d 23:59:59"),
+                start.strftime("%Y-%m-%d 00:00:00"), db_now.strftime("%Y-%m-%d 23:59:59"),
                 cfg.TEMP_LOW, cfg.TEMP_HIGH, self._cid(),
             )
             for r in rows:
@@ -244,8 +260,25 @@ class HybridProvider:
                     "compliance_pct": round(comp / total * 100, 1) if total else 0.0,
                 })
 
-        cc.update(data=history, ts=now_ts)
-        return history
+        seen: set[str] = set()
+        deduped: list[dict] = []
+        for h in history:
+            if h["date"] not in seen:
+                seen.add(h["date"])
+                deduped.append(h)
+        by_date = {h["date"]: h for h in deduped}
+
+        filled: list[dict] = []
+        cursor = start.date() if hasattr(start, "date") else start
+        end_d = db_now.date() if hasattr(db_now, "date") else db_now
+        one_day = timedelta(days=1)
+        while cursor <= end_d:
+            ds = cursor.isoformat()
+            filled.append(by_date.get(ds, {"date": ds, "compliance_pct": 0.0}))
+            cursor += one_day
+
+        cc.update(data=filled, ts=now_ts)
+        return filled
 
     # ── devices ─────────────────────────────────────────────────────────────
 
@@ -265,7 +298,7 @@ class HybridProvider:
         if ac["data"] is not None and (now - ac["ts"]) < ac["ttl"]:
             return ac["data"]
         states = self.get_all_sensor_states()
-        result = self._alerts.evaluate(states)
+        result = self._alerts.evaluate(states, now_dt=self._db_now())
         ac.update(data=result, ts=now)
         return result
 

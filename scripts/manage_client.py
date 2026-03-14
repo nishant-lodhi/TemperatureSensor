@@ -45,8 +45,8 @@ def _resolve_dashboard_url(region: str, deployment_id: str, prefix: str = "") ->
     """Try to get the dashboard URL from CloudFormation stack outputs."""
     prefix = prefix or DEFAULT_PREFIX
     cf = boto3.client("cloudformation", region_name=region)
-    for suffix in ["dev", "staging", "prod", "saas-dev", "govcloud-dev", "govcloud-prod"]:
-        stack_name = f"{prefix}-{suffix}"
+    for suffix in ["dev", "staging", "prod", "prod-server1", "prod-server2"]:
+        stack_name = f"{prefix}-Dashboard-{suffix}"
         try:
             resp = cf.describe_stacks(StackName=stack_name)
             outputs = resp["Stacks"][0].get("Outputs", [])

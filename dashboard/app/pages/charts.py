@@ -5,7 +5,6 @@ Every function takes data + config, returns a go.Figure. No DB calls.
 
 from __future__ import annotations
 
-import numpy as np
 import plotly.graph_objects as go
 
 from app import config as cfg
@@ -54,6 +53,34 @@ def _downsample(readings: list[dict], target: int | None = None) -> list[dict]:
     return deduped
 
 
+def _smart_y_range(temps: list[float]) -> list[float]:
+    """Compute Y-axis range: always shows all 4 threshold lines, focuses
+    the view on the operational zone, and handles outliers gracefully.
+
+    Guarantees: TEMP_CRITICAL_LOW..TEMP_CRITICAL_HIGH are always visible
+    so officers see every threshold line. If data extends beyond the
+    critical boundaries, IQR fencing prevents wild outliers from
+    crushing the useful portion of the chart.
+    """
+    floor = cfg.TEMP_CRITICAL_LOW
+    ceil = cfg.TEMP_CRITICAL_HIGH
+    if not temps:
+        return [floor - 5, ceil + 5]
+
+    s = sorted(temps)
+    n = len(s)
+    q1 = s[max(0, int(n * 0.25))]
+    q3 = s[min(n - 1, int(n * 0.75))]
+    iqr = max(q3 - q1, 1)
+    fence = iqr * 2.0
+
+    data_lo = min(floor, max(s[0], q1 - fence))
+    data_hi = max(ceil, min(s[-1], q3 + fence))
+
+    pad = max(3, (data_hi - data_lo) * 0.06)
+    return [data_lo - pad, data_hi + pad]
+
+
 def unified_chart(
     readings: list[dict],
     fc_series: list[dict],
@@ -61,6 +88,9 @@ def unified_chart(
     range_mode: str = "live",
     is_offline: bool = False,
     height: int = 360,
+    x_since: str | None = None,
+    x_until: str | None = None,
+    ui_revision: str | None = None,
 ) -> go.Figure:
     if len(readings) > cfg.CHART_DOWNSAMPLE_TARGET:
         readings = _downsample(readings)
@@ -71,13 +101,21 @@ def unified_chart(
 
     f_ts = [f["timestamp"] for f in fc_series]
     all_ts = h_ts + f_ts
-    if all_ts:
-        fig.add_trace(go.Scatter(
-            x=[all_ts[0], all_ts[-1], all_ts[-1], all_ts[0]],
-            y=[cfg.TEMP_LOW, cfg.TEMP_LOW, cfg.TEMP_HIGH, cfg.TEMP_HIGH],
-            fill="toself", fillcolor=cfg.COLORS["safe_zone"],
-            line=dict(width=0), showlegend=False, hoverinfo="skip",
-        ))
+    band_start = x_since or (all_ts[0] if all_ts else None)
+    band_end = x_until or (all_ts[-1] if all_ts else None)
+
+    y_range = _smart_y_range(h_t)
+
+    if band_start and band_end:
+        safe_lo = max(cfg.TEMP_LOW, y_range[0])
+        safe_hi = min(cfg.TEMP_HIGH, y_range[1])
+        if safe_lo < safe_hi:
+            fig.add_trace(go.Scatter(
+                x=[band_start, band_end, band_end, band_start],
+                y=[safe_lo, safe_lo, safe_hi, safe_hi],
+                fill="toself", fillcolor=cfg.COLORS["safe_zone"],
+                line=dict(width=0), showlegend=False, hoverinfo="skip",
+            ))
 
     line_color = cfg.COLORS["offline"] if is_offline else cfg.COLORS["primary"]
     line_dash = "dot" if is_offline else "solid"
@@ -85,6 +123,7 @@ def unified_chart(
         x=h_ts, y=h_t, mode="lines",
         name="Last Readings" if is_offline else "Actual",
         line=dict(color=line_color, width=2.5, dash=line_dash),
+        hovertemplate="%{y:.1f}°F<extra></extra>",
     ))
 
     if fc_series and not is_offline:
@@ -106,7 +145,6 @@ def unified_chart(
             fillcolor="rgba(249,115,22,0.06)", line=dict(width=0),
             name="Forecast Range",
         ))
-        # Torch glow
         fig.add_trace(go.Scatter(
             x=f_ts, y=f_pred, mode="lines",
             line=dict(color="rgba(249,115,22,0.10)", width=14),
@@ -120,14 +158,18 @@ def unified_chart(
         fig.add_trace(go.Scatter(
             x=f_ts, y=f_pred, mode="lines", name="Forecast",
             line=dict(color=cfg.COLORS["accent"], width=2.5, dash="dot"),
+            hovertemplate="Forecast: %{y:.1f}°F<extra></extra>",
         ))
 
-    if h_t:
-        arr = np.array(h_t, dtype=float)
-        hi, lo = float(np.max(arr)), float(np.min(arr))
-        _add_threshold_lines(fig, hi, lo)
+    _add_threshold_lines(fig)
 
-    _add_safe_thresholds(fig)
+    if not h_ts and x_since and x_until:
+        fig.add_annotation(
+            text="No readings in this range",
+            xref="paper", yref="paper", x=0.5, y=0.5,
+            showarrow=False,
+            font=dict(size=13, color=cfg.COLORS["text_muted"]),
+        )
 
     if alerts:
         _add_alert_markers(fig, alerts, h_ts, h_t)
@@ -138,42 +180,29 @@ def unified_chart(
         elif range_mode == "live" and fc_series:
             _add_marker_line(fig, h_ts[-1], "Now", cfg.COLORS["offline"])
 
-    _apply_layout(fig, height, range_mode, is_offline)
+    _apply_layout(fig, height, range_mode, is_offline, x_since, x_until,
+                   y_range=y_range, ui_revision=ui_revision)
     return fig
 
 
-def _add_threshold_lines(fig, hi, lo):
-    fig.add_hline(
-        y=hi, line_dash="dash", line_color="rgba(220,38,38,0.25)",
-        line_width=1,
-        annotation_text=f"High: {hi:.1f}°F",
-        annotation_font_color=cfg.COLORS["danger"],
-        annotation_font_size=9, annotation_position="top right",
-    )
-    fig.add_hline(
-        y=lo, line_dash="dash", line_color="rgba(13,148,136,0.25)",
-        line_width=1,
-        annotation_text=f"Low: {lo:.1f}°F",
-        annotation_font_color=cfg.COLORS["primary"],
-        annotation_font_size=9, annotation_position="bottom right",
-    )
-
-
-def _add_safe_thresholds(fig):
-    fig.add_hline(
-        y=cfg.TEMP_HIGH, line_dash="dot",
-        line_color=cfg.COLORS["danger"], line_width=1,
-        annotation_text="Too Hot",
-        annotation_font_color=cfg.COLORS["danger"],
-        annotation_font_size=9, annotation_position="top left",
-    )
-    fig.add_hline(
-        y=cfg.TEMP_LOW, line_dash="dot",
-        line_color=cfg.COLORS["primary"], line_width=1,
-        annotation_text="Too Cold",
-        annotation_font_color=cfg.COLORS["primary"],
-        annotation_font_size=9, annotation_position="bottom left",
-    )
+def _add_threshold_lines(fig):
+    """Draw all 4 threshold lines — always visible so officers see context."""
+    lines = [
+        (cfg.TEMP_CRITICAL_HIGH, "dash", "rgba(220,38,38,0.35)", 1.5,
+         f"Critical {cfg.TEMP_CRITICAL_HIGH:.0f}°F", cfg.COLORS["critical"], "top right"),
+        (cfg.TEMP_HIGH, "dot", cfg.COLORS["danger"], 1,
+         f"Too Hot {cfg.TEMP_HIGH:.0f}°F", cfg.COLORS["danger"], "top left"),
+        (cfg.TEMP_LOW, "dot", cfg.COLORS["primary"], 1,
+         f"Too Cold {cfg.TEMP_LOW:.0f}°F", cfg.COLORS["primary"], "bottom left"),
+        (cfg.TEMP_CRITICAL_LOW, "dash", "rgba(59,130,246,0.35)", 1.5,
+         f"Critical {cfg.TEMP_CRITICAL_LOW:.0f}°F", "#3b82f6", "bottom right"),
+    ]
+    for value, dash, line_color, width, text, font_color, pos in lines:
+        fig.add_hline(
+            y=value, line_dash=dash, line_color=line_color, line_width=width,
+            annotation_text=text, annotation_font_color=font_color,
+            annotation_font_size=9, annotation_position=pos,
+        )
 
 
 def _add_alert_markers(fig, alerts, h_ts, h_t):
@@ -241,14 +270,19 @@ def _add_marker_line(fig, x, label, color):
     )
 
 
-def _apply_layout(fig, height, range_mode, is_offline):
+def _apply_layout(fig, height, range_mode, is_offline,
+                   x_since=None, x_until=None, y_range=None,
+                   ui_revision=None):
     title = None
     if is_offline:
         title = dict(
             text="Offline — Last Known Data",
             font=dict(size=10, color=cfg.COLORS["offline"]), x=0.5,
         )
-    fig.update_layout(
+    xaxis = dict(gridcolor=cfg.CHART_GRID_COLOR)
+    if x_since and x_until:
+        xaxis["range"] = [x_since, x_until]
+    layout_kwargs = dict(
         template=cfg.CHART_TEMPLATE,
         paper_bgcolor=cfg.CHART_PAPER_BG,
         plot_bgcolor=cfg.CHART_PLOT_BG,
@@ -257,14 +291,21 @@ def _apply_layout(fig, height, range_mode, is_offline):
         margin=dict(l=40, r=50, t=25, b=28),
         hovermode="x unified",
         hoverlabel=cfg.HOVER_LABEL,
-        xaxis=dict(gridcolor=cfg.CHART_GRID_COLOR),
-        yaxis=dict(gridcolor=cfg.CHART_GRID_COLOR, title="°F"),
+        xaxis=xaxis,
+        yaxis=dict(
+            gridcolor=cfg.CHART_GRID_COLOR, title="°F",
+            range=y_range,
+        ),
         legend=dict(
             orientation="h", yanchor="top", y=-0.15,
             xanchor="center", x=0.5, font=dict(size=9),
         ),
         title=title,
+        dragmode="zoom",
     )
+    if ui_revision:
+        layout_kwargs["uirevision"] = ui_revision
+    fig.update_layout(**layout_kwargs)
 
 
 def compliance_gauge(pct, label="Live Compliance"):

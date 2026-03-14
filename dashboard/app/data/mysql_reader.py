@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 from app import config as cfg
@@ -153,6 +153,48 @@ def fetch_sensors_by_location(
         tuple(params), client_id=client_id,
     )
     return [r["mac"] for r in rows]
+
+
+_tz_offset: Optional[timedelta] = None
+_tz_offset_ts: float = 0
+
+
+def _detect_tz_offset(client_id: str | None = None) -> timedelta:
+    """Auto-detect offset between DB server time and date_added timezone.
+
+    Compares NOW() with the most recent sensor reading. If the sensor is
+    active (reading <10 min old in server time), the difference reveals
+    the timezone offset of date_added.  Cached for 1 hour.
+    """
+    global _tz_offset, _tz_offset_ts
+    import time as _t
+    if _tz_offset is not None and (_t.time() - _tz_offset_ts) < 3600:
+        return _tz_offset
+
+    row = query_one(
+        "SELECT NOW() AS server_now, MAX(date_added) AS latest "
+        "FROM dg_gateway_data WHERE mac_type='Temp-Sensor'",
+        client_id=client_id,
+    )
+    if row and row.get("server_now") and row.get("latest"):
+        diff_sec = (row["server_now"] - row["latest"]).total_seconds()
+        offset_hours = round(diff_sec / 3600)
+        _tz_offset = timedelta(hours=offset_hours)
+    else:
+        _tz_offset = timedelta(0)
+
+    _tz_offset_ts = _t.time()
+    logger.info("Detected TZ offset: date_added is %s hours behind DB server time", _tz_offset)
+    return _tz_offset
+
+
+def fetch_db_now(client_id: str | None = None) -> Optional[datetime]:
+    """Get current time in the same timezone as date_added values."""
+    row = query_one("SELECT NOW() AS server_now", client_id=client_id)
+    if not row or not row.get("server_now"):
+        return None
+    offset = _detect_tz_offset(client_id)
+    return row["server_now"] - offset
 
 
 # ── Sensor queries ───────────────────────────────────────────────────────────

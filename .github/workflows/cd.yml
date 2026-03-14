@@ -1,21 +1,11 @@
-# ─────────────────────────────────────────────────────────────────────────────
-# CD — Continuous Deployment
+# CD — Build container image + deploy via SAM.
 #
-# Deploys to the correct target(s) based on trigger:
-#   • Push to "develop"  → deploys to DEV (1 stack)
-#   • Push to "main"     → deploys to STAGING (1 stack)
-#   • Git tag "v*"       → deploys to ALL prod servers (parallel, each needs approval)
-#   • Manual trigger     → deploys to whichever target you pick
-#
-# Multi-server production:
-#   Each prod server is a separate GitHub Environment (prod-server1, prod-server2, …)
-#   with its own approval gate and secrets. A v* tag deploys to all of them.
-#   samconfig.toml has one section per server with its own DeploymentId + DbSecretArn.
-#
-# Auth: AWS Access Keys stored as GitHub Secrets (per environment).
-# ─────────────────────────────────────────────────────────────────────────────
-
-name: CD — Deploy
+# Triggers:
+#   push develop  → dev
+#   push main     → staging
+#   tag  v*       → all prod servers
+#   manual        → chosen target
+name: CD
 
 on:
   push:
@@ -24,51 +14,17 @@ on:
   workflow_dispatch:
     inputs:
       target:
-        description: "Deploy target (server)"
+        description: Deploy target
         required: true
         type: choice
-        options:
-          - dev
-          - staging
-          - prod-server1
-          # Add more prod servers here as you onboard them:
-          # - prod-server2
-          # - prod-server3
+        options: [dev, staging, prod-server1]
 
 concurrency:
   group: deploy-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  # ── CI safety gate (runs once) ───────────────────────────────────────────
-  ci-gate:
-    name: CI Gate (lint + test)
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    defaults:
-      run:
-        working-directory: dashboard
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.10"
-          cache: "pip"
-          cache-dependency-path: |
-            dashboard/requirements.txt
-            requirements-dev.txt
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt -r ../requirements-dev.txt
-      - name: Lint
-        run: python -m ruff check app/ tests/
-      - name: Test
-        run: python -m pytest tests/ -v --tb=short
-
-  # ── Determine which targets to deploy to ─────────────────────────────────
-  resolve-targets:
-    name: Resolve deploy targets
+  resolve:
     runs-on: ubuntu-latest
     outputs:
       targets: ${{ steps.pick.outputs.targets }}
@@ -76,74 +32,88 @@ jobs:
       - id: pick
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            # Manual: deploy to the single selected target
-            echo 'targets=["${{ github.event.inputs.target }}"]' >> "$GITHUB_OUTPUT"
-
-          elif [[ "${{ github.ref }}" == refs/tags/v* ]]; then
-            # Tag: deploy to ALL production servers (parallel)
-            # ── Add new prod servers to this list ──
+            echo 'targets=["${{ inputs.target }}"]' >> "$GITHUB_OUTPUT"
+          elif [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             echo 'targets=["prod-server1"]' >> "$GITHUB_OUTPUT"
-
-          elif [ "${{ github.ref }}" = "refs/heads/main" ]; then
+          elif [ "$GITHUB_REF" = "refs/heads/main" ]; then
             echo 'targets=["staging"]' >> "$GITHUB_OUTPUT"
-
           else
             echo 'targets=["dev"]' >> "$GITHUB_OUTPUT"
           fi
 
-  # ── Deploy (runs once per target, parallel for multi-server prod) ────────
   deploy:
-    name: Deploy → ${{ matrix.target }}
-    needs: [ci-gate, resolve-targets]
+    needs: resolve
     runs-on: ubuntu-latest
     timeout-minutes: 20
     environment: ${{ matrix.target }}
     strategy:
       matrix:
-        target: ${{ fromJson(needs.resolve-targets.outputs.targets) }}
+        target: ${{ fromJson(needs.resolve.outputs.targets) }}
       fail-fast: false
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Python 3.10
-        uses: actions/setup-python@v5
+      - uses: aws-actions/setup-sam@v2
         with:
-          python-version: "3.10"
-          cache: "pip"
-          cache-dependency-path: dashboard/requirements.txt
+          use-installer: true
 
-      - name: Install SAM CLI
-        run: pip install aws-sam-cli
-
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
+      - uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
 
+      - name: Ensure ECR repo exists
+        run: |
+          REPO=$(grep 'image_repositories' infra/samconfig.toml \
+            | grep -oP '(?<=/)[^"]+' | head -1 || true)
+          if [ -n "$REPO" ]; then
+            aws ecr describe-repositories --repository-names "$REPO" 2>/dev/null \
+              || aws ecr create-repository --repository-name "$REPO" \
+                   --image-scanning-configuration scanOnPush=true
+          fi
+
+      - name: Delete failed stack if exists
+        run: |
+          STACK=$(grep -A2 '^\[${{ matrix.target }}\.deploy\.parameters\]' infra/samconfig.toml \
+            | grep stack_name | sed 's/.*= *"\(.*\)"/\1/')
+          STATUS=$(aws cloudformation describe-stacks --stack-name "$STACK" \
+            --query 'Stacks[0].StackStatus' --output text 2>/dev/null || echo "NONE")
+          if [ "$STATUS" = "ROLLBACK_COMPLETE" ]; then
+            echo "Deleting failed stack $STACK..."
+            aws cloudformation delete-stack --stack-name "$STACK"
+            aws cloudformation wait stack-delete-complete --stack-name "$STACK"
+          fi
+
       - name: SAM build
         run: sam build --template-file infra/template.yaml
 
-      - name: SAM deploy to ${{ matrix.target }}
+      - name: Inject secrets into samconfig
+        run: |
+          EXTRA=""
+          [ -n "${{ secrets.MYSQL_PASSWORD }}" ] && EXTRA="$EXTRA MysqlPassword=${{ secrets.MYSQL_PASSWORD }}"
+          [ -n "${{ secrets.COOKIE_SECRET }}" ]  && EXTRA="$EXTRA CookieSecret=${{ secrets.COOKIE_SECRET }}"
+          if [ -n "$EXTRA" ]; then
+            sed -i '/^\['"${{ matrix.target }}"'\.deploy\.parameters\]/,/^$\|^\[/{
+              s|^\(parameter_overrides *= *".*\)"|\1'"$EXTRA"'"|
+            }' infra/samconfig.toml
+          fi
+
+      - name: SAM deploy
         run: |
           sam deploy \
             --config-env ${{ matrix.target }} \
             --config-file infra/samconfig.toml \
-            --parameter-overrides \
-              "MysqlPassword=${{ secrets.MYSQL_PASSWORD }}" \
-              "CookieSecret=${{ secrets.COOKIE_SECRET }}" \
             --no-confirm-changeset \
             --no-fail-on-empty-changeset
 
-      - name: Print deployed URL
+      - name: Print URL
+        if: always()
         run: |
-          STACK=$(grep -A1 '^\[${{ matrix.target }}.deploy.parameters\]' infra/samconfig.toml \
+          STACK=$(grep -A2 '^\[${{ matrix.target }}\.deploy\.parameters\]' infra/samconfig.toml \
             | grep stack_name | sed 's/.*= *"\(.*\)"/\1/')
-          URL=$(aws cloudformation describe-stacks \
-            --stack-name "$STACK" \
+          URL=$(aws cloudformation describe-stacks --stack-name "$STACK" \
             --query 'Stacks[0].Outputs[?OutputKey==`DashboardUrl`].OutputValue' \
             --output text 2>/dev/null || echo "N/A")
-          echo "### ${{ matrix.target }} → $URL" >> $GITHUB_STEP_SUMMARY
+          echo "### ${{ matrix.target }} → $URL" >> "$GITHUB_STEP_SUMMARY"

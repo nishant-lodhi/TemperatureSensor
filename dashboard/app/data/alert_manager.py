@@ -99,10 +99,10 @@ class AlertManager:
         except Exception as exc:
             logger.warning("Failed to load alerts from DynamoDB: %s", exc)
 
-    def evaluate(self, sensor_states: list[dict]) -> list[dict]:
+    def evaluate(self, sensor_states: list[dict], now_dt: datetime | None = None) -> list[dict]:
         """Check all conditions, create/resolve alerts. Returns live alerts."""
-        now = datetime.now(timezone.utc)
-        now_iso = now.isoformat()
+        now = now_dt if now_dt else datetime.now(timezone.utc)
+        now_iso = now.replace(tzinfo=None).isoformat() if now.tzinfo else now.isoformat()
 
         for state in sensor_states:
             did = state["device_id"]
@@ -184,9 +184,9 @@ class AlertManager:
         alert = self._memory.pop(pk, None)
         self._cooldowns[pk] = time.time()
         if alert:
-            alert_copy = {**alert, "state": "DISMISSED", "resolved_at": datetime.now(timezone.utc).isoformat()}
+            now_iso = datetime.now().isoformat()
+            alert_copy = {**alert, "state": "DISMISSED", "resolved_at": now_iso}
             self._resolved.append(alert_copy)
-            now_iso = datetime.now(timezone.utc).isoformat()
             try:
                 self._table.update_item(
                     Key={"PK": pk, "SK": alert["SK"]},

@@ -3,14 +3,18 @@
 Extracted from main.py to keep app creation separate from HTTP plumbing.
 """
 
+import logging
 import os
 
 from flask import Response, g, make_response, redirect, request
 
 from app import config as cfg
 
-_AUTH_SKIP = ("/connect/", "/disconnect", "/_dash-component-suites/",
-              "/_dash-dependencies", "/assets/", "/_reload-hash")
+logger = logging.getLogger("tempsensor.routes")
+
+_AUTH_SKIP = ("/connect/", "/disconnect", "/healthz",
+              "/_dash-component-suites/", "/_dash-dependencies",
+              "/assets/", "/_reload-hash")
 
 
 def register(server):
@@ -42,6 +46,7 @@ def register(server):
             return resp
         g.client_id = payload["client_id"]
         g.client_name = payload["client_name"]
+        logger.debug("AUTH client=%s path=%s", g.client_id, path)
         return None
 
     @server.route("/connect/<token>")
@@ -51,16 +56,20 @@ def register(server):
         from app.auth import COOKIE_MAX_AGE, COOKIE_NAME, create_cookie, resolve_token
         client = resolve_token(token)
         if not client:
+            logger.warning("CONNECT_FAIL token=%s…", token[:8])
             return _expired_page("Invalid or expired access link.")
         cookie_val = create_cookie(client["client_id"], client["client_name"], token[:8])
         resp = redirect("/")
         resp.set_cookie(COOKIE_NAME, cookie_val, max_age=COOKIE_MAX_AGE,
                         httponly=True, samesite="Lax", secure=request.scheme == "https")
+        logger.info("CONNECT client=%s name=%s", client["client_id"], client["client_name"])
         return resp
 
     @server.route("/disconnect")
     def disconnect():
         from app.auth import COOKIE_NAME
+        cid = getattr(g, "client_id", None) or "?"
+        logger.info("DISCONNECT client=%s", cid)
         resp = redirect("/connect/none")
         resp.delete_cookie(COOKIE_NAME)
         return resp
@@ -85,6 +94,7 @@ def register(server):
             result["provider"] = f"OK ({len(states)} sensors) in {_t.time()-t0:.2f}s"
         except Exception as exc:
             result["provider"] = f"FAIL: {exc}"
+        logger.info("HEALTHZ %s", result)
         return Response(json.dumps(result, indent=2), mimetype="application/json")
 
 

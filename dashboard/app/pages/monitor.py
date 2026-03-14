@@ -51,7 +51,9 @@ _BD = cfg.COLORS["card_border"]
 # ═══════════════════════════════════════════════════════════════════════
 
 def layout(**kwargs):
-    today = datetime.now(timezone.utc).date()
+    prov = get_provider(get_client_id())
+    db_now = prov.get_db_time()
+    today = db_now.date() if db_now else datetime.now(timezone.utc).date()
     return html.Div([
         dcc.Interval(id="mon-tick", interval=cfg.REFRESH_MONITOR_MS),
         dcc.Store(id="store-states", data=[]),
@@ -307,27 +309,25 @@ def readings_pump(selected_id, range_mode, date_range, _, states):
 
 
 def _fetch_readings(prov, device_id, range_mode, states, date_range=None):
-    now = datetime.now(timezone.utc)
+    db_now = prov.get_db_time()
     state = (
         next((s for s in states if s["device_id"] == device_id), None)
         if states else None
     )
     is_offline = state and state.get("status") == "offline"
-    anchor = now
+    anchor = db_now
     if is_offline and state.get("last_seen"):
         try:
             anchor = datetime.fromisoformat(
-                state["last_seen"].replace("Z", "+00:00"),
+                state["last_seen"].replace("Z", ""),
             )
         except (ValueError, TypeError):
             pass
 
     if range_mode == "custom" and date_range:
-        since = datetime.fromisoformat(date_range["start"]).replace(
-            tzinfo=timezone.utc,
-        )
+        since = datetime.fromisoformat(date_range["start"])
         until = datetime.fromisoformat(date_range["end"]).replace(
-            hour=23, minute=59, second=59, tzinfo=timezone.utc,
+            hour=23, minute=59, second=59,
         )
         hours = max(1, int((until - since).total_seconds() / 3600))
     else:
@@ -337,7 +337,7 @@ def _fetch_readings(prov, device_id, range_mode, states, date_range=None):
             else 2
         )
         since = anchor - timedelta(hours=hours)
-        until = anchor if is_offline else now
+        until = anchor if is_offline else db_now
 
     readings = prov.get_readings(
         device_id,
@@ -349,10 +349,16 @@ def _fetch_readings(prov, device_id, range_mode, states, date_range=None):
     alert_hist = prov.get_alert_history(device_id, days=max(hours // 24, cfg.COMPLIANCE_DAYS))
     fc_alerts = _build_forecast_alerts(fc, device_id) if fc else []
 
+    x_until = until
+    if range_mode == "live" and not is_offline:
+        x_until = db_now + timedelta(hours=1)
+
     return {
         "device_id": device_id, "readings": readings, "forecast": fc,
         "offline": bool(is_offline), "alerts": alert_hist + fc_alerts,
         "range_mode": range_mode, "forecast_alert_count": len(fc_alerts),
+        "since": since.strftime("%Y-%m-%dT%H:%M:%S"),
+        "until": x_until.strftime("%Y-%m-%dT%H:%M:%S"),
     }
 
 
@@ -637,11 +643,11 @@ def handle_note(clicks, states):
             prov.send_alert_note(parts[0], parts[1], {
                 "device_id": parts[0], "alert_type": parts[1],
                 "sensor_state": st,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "timestamp": datetime.now().isoformat(),
             })
             return (
                 {"index": tid["index"],
-                 "ts": datetime.now(timezone.utc).isoformat()},
+                 "ts": datetime.now().isoformat()},
                 prov.get_live_alerts(),
             )
     return no_update, no_update
@@ -834,8 +840,8 @@ def render_kpis(rd, states, selected_id):
         ("In Range", f"{cp}%",
          cfg.COLORS["success"] if cp >= cfg.COMPLIANCE_TARGET
          else cfg.COLORS["warning"]),
-        ("Battery", f"{bat}%" if st != "offline" else "N/A",
-         bc if st != "offline" else _TM),
+        ("Battery", f"{bat}%",
+         bc),
         ("Signal", sig,
          cfg.COLORS["success"] if sig in ("Strong", "Good")
          else cfg.COLORS["warning"]),
@@ -892,7 +898,7 @@ def render_range_bar(current):
     Input("store-readings", "data"),
 )
 def render_chart(rd):
-    if not rd or not rd.get("readings"):
+    if not rd:
         return html.Div(
             "Select a sensor to view chart", className="wcard",
             style={"padding": "30px", "textAlign": "center",
@@ -902,12 +908,23 @@ def render_chart(rd):
     from app.pages.charts import unified_chart
     rm = rd.get("range_mode", "live")
     h = 2 if rm == "live" else int(rm) if rm and rm.isdigit() else 2
+    revision_key = f"{rd.get('device_id', '')}-{rm}-{rd.get('since', '')}"
     fig = unified_chart(
-        rd["readings"], rd.get("forecast", []), rd.get("alerts", []),
+        rd.get("readings", []), rd.get("forecast", []), rd.get("alerts", []),
         rm, rd.get("offline", False), cfg.CHART_HEIGHT_DEFAULT if h <= 48 else cfg.CHART_HEIGHT_EXTENDED,
+        x_since=rd.get("since"), x_until=rd.get("until"),
+        ui_revision=revision_key,
     )
     return dbc.Card(
-        dcc.Graph(figure=fig, config={"displayModeBar": False}),
+        dcc.Graph(figure=fig, config={
+            "displayModeBar": "hover",
+            "displaylogo": False,
+            "modeBarButtonsToRemove": [
+                "pan2d", "lasso2d", "select2d",
+                "autoScale2d", "toImage",
+            ],
+            "scrollZoom": False,
+        }),
         className="wcard mb-2",
     )
 
@@ -942,7 +959,7 @@ def render_compliance(states, comp, location_filter):
     hot = sum(1 for t in online_temps if t > cfg.TEMP_HIGH)
     cold = sum(1 for t in online_temps if t < cfg.TEMP_LOW)
     issue = hot + cold
-    pct = round(in_r / len(online) * 100, 1) if online else 0.0
+    pct = round(in_r / total * 100, 1) if total else 0.0
 
     scope = location_filter if location_filter else "All Facilities"
     gl = (
@@ -1092,7 +1109,7 @@ def _stat(label, value, color):
 def _fmt_time(iso):
     try:
         return datetime.fromisoformat(
-            iso.replace("Z", "+00:00"),
+            iso.replace("Z", ""),
         ).strftime("%b %d, %H:%M")
     except Exception:
         return ""

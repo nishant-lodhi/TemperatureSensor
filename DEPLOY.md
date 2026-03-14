@@ -66,137 +66,60 @@ A serverless dashboard that monitors temperature sensors in correctional facilit
 
 ## Prerequisites — Install Everything
 
-Before starting, you need these tools on your computer. Follow each step exactly.
+You need these tools on your computer. Lambda runs Python 3.14 inside a container image — you do NOT need Python 3.14 locally.
 
-### 1. Python 3.10 or Later
+| Tool | Purpose | Local dev | Deploying |
+|------|---------|-----------|-----------|
+| Python 3.12+ | Lint, tests, local dashboard | Required | Required |
+| Docker | Container image build for Lambda | For `make sam-build` | Required |
+| AWS CLI v2 | Talk to AWS | Optional | Required |
+| SAM CLI | Build + deploy Lambda | For `make sam-build` | Required |
+| Git | Version control | Required | Required |
 
-Python is the programming language the dashboard is written in.
+### Python 3.12+
 
-**Check if already installed:**
 ```bash
-python3 --version
-```
-If it prints `Python 3.10.x` or higher, skip to the next tool.
-
-**Install on Ubuntu/Debian (Linux):**
-```bash
-sudo apt update
-sudo apt install -y python3.10 python3.10-venv python3-pip
+python3 --version   # Need 3.12 or higher
 ```
 
-**Install on macOS:**
+If not installed: `sudo apt install -y python3 python3-pip` (Linux) or `brew install python` (macOS) or download from https://www.python.org/downloads/
+
+### Docker
+
+Lambda is deployed as a container image (base: `public.ecr.aws/lambda/python:3.14`). Docker is needed to build it.
+
 ```bash
-brew install python@3.10
+docker --version
 ```
 
-**Install on Windows:**
-Download from https://www.python.org/downloads/ — during install, check "Add Python to PATH".
+If not installed: `sudo apt install -y docker.io && sudo usermod -aG docker $USER` (Linux) or install Docker Desktop from https://www.docker.com/products/docker-desktop/ (macOS/Windows).
 
-### 2. pip (Python Package Manager)
+### AWS CLI v2 + SAM CLI
 
-pip installs Python libraries. It usually comes with Python.
-
-**Upgrade to latest version:**
 ```bash
-python3 -m pip install --upgrade pip
+aws --version    # Need aws-cli/2.x
+sam --version    # Need SAM CLI 1.x
 ```
 
-### 3. Git
+**AWS CLI:** https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html
 
-Git tracks code changes and is used to push code to GitHub.
+**SAM CLI:** `pip install aws-sam-cli`
 
-**Check if installed:**
-```bash
-git --version
-```
-
-**Install on Ubuntu/Debian:**
-```bash
-sudo apt install -y git
-```
-
-**Install on macOS:**
-```bash
-brew install git
-```
-
-**Install on Windows:**
-Download from https://git-scm.com/downloads
-
-### 4. AWS CLI v2
-
-The AWS CLI lets you talk to AWS from your terminal. Needed for deployments.
-
-**Check if installed:**
-```bash
-aws --version
-```
-You need version 2.x. If you see version 1.x, uninstall it first.
-
-**Install on Linux:**
-```bash
-curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
-unzip awscliv2.zip
-sudo ./aws/install
-rm -rf aws awscliv2.zip
-```
-
-**Install on macOS:**
-```bash
-curl "https://awscli.amazonaws.com/AWSCLIV2.pkg" -o "AWSCLIV2.pkg"
-sudo installer -pkg AWSCLIV2.pkg -target /
-rm AWSCLIV2.pkg
-```
-
-**Install on Windows:**
-Download and run: https://awscli.amazonaws.com/AWSCLIV2.msi
-
-**Configure AWS CLI (one-time):**
+**Configure AWS (one-time):**
 ```bash
 aws configure
+# Enter: Access Key ID, Secret Key, Region (us-east-1), Output (json)
 ```
-It will ask for:
-- **AWS Access Key ID**: Get from your AWS admin (IAM → Users → Security Credentials)
-- **AWS Secret Access Key**: Same place as above
-- **Default region**: `us-east-1` (or whatever region your DB is in)
-- **Default output format**: `json`
-
-> **Note**: If you are only doing local development (no AWS deployment), you do NOT need AWS CLI.
-
-### 5. AWS SAM CLI
-
-SAM CLI packages and deploys your code to AWS Lambda.
-
-**Install:**
-```bash
-pip install aws-sam-cli
-```
-
-**Verify:**
-```bash
-sam --version
-```
-You should see something like `SAM CLI, version 1.x.x`.
-
-### 6. GitHub Account
-
-You need a GitHub account to store code and run the CI/CD pipelines.
-
-Sign up at https://github.com if you do not have one.
 
 ### Summary Checklist
 
-Run these commands to verify everything is ready:
-
 ```bash
-python3 --version    # Should print 3.10+
-pip --version        # Should print pip 2x.x+
-git --version        # Should print git 2.x+
-aws --version        # Should print aws-cli/2.x.x
-sam --version        # Should print SAM CLI, version 1.x.x
+python3 --version   # 3.12+
+docker --version    # 20+
+aws --version       # 2.x
+sam --version       # 1.x
+git --version       # 2.x
 ```
-
-If all five print a version number, you are ready to proceed.
 
 ---
 
@@ -313,23 +236,24 @@ http://localhost:8051
 
 You should see the TempSensor dashboard with your sensors.
 
-### Step 5: Run Tests, Lint, and Validate
+### Step 5: Pre-Push Validation
 
 ```bash
-cd dashboard
-
-# Run all 161 unit tests (takes ~3 seconds)
-python -m pytest tests/ -v
-
-# Run the linter (should show 0 errors)
-python -m ruff check app/ tests/
-
-# Validate the SAM infrastructure template (catches config errors before deploy)
-pip install aws-sam-cli    # one-time install if you haven't already
-sam validate --template-file ../infra/template.yaml --lint
+make validate
 ```
 
-**All three must pass** before you commit any code changes. These are the same checks the CI pipeline runs automatically on every Pull Request.
+Runs: **lint → test → sam validate → sam build** (Docker image). All must pass before pushing.
+
+| Command | What it does |
+|---|---|
+| `make lint` | Code style (ruff) |
+| `make test` | Unit tests (pytest) |
+| `make sam-validate` | Validate SAM template syntax (needs SAM CLI + AWS region) |
+| `make sam-build` | Build Lambda container image (needs Docker running) |
+| `make validate` | All four in order |
+| `make run` | Start dashboard locally |
+
+> **Why container image?** Dependencies (pyarrow, pandas, plotly, etc.) exceed Lambda's 250 MB ZIP limit. Container images support up to 10 GB. `sam build` runs `docker build` using `dashboard/Dockerfile.lambda` (base: `public.ecr.aws/lambda/python:3.14`).
 
 ### Data Source Switching
 
@@ -353,21 +277,22 @@ After starting the dashboard, verify each feature works:
 
 | # | Feature | How to Validate | Expected Result |
 |---|---|---|---|
-| 1 | **Dashboard loads** | Open http://localhost:8051 | Navbar with clock and LIVE indicator |
+| 1 | **Dashboard loads** | Open http://localhost:8051 | Navbar with clock showing "Local" time (auto-detected from DB timezone) |
 | 2 | **Sensor tiles** | Look below the filter bar | Grid of sensor cards showing temp, battery, signal |
 | 3 | **Facility filter** | Click "All Facilities" dropdown | Dropdown with location names from DB |
 | 4 | **Sensor filter** | Select a facility, check sensor dropdown | Only sensors from that facility |
-| 5 | **Sensor selection** | Click a sensor tile | KPIs appear, chart loads |
-| 6 | **Chart — LIVE** | With sensor selected, click LIVE | Line chart with data + forecast |
-| 7 | **Chart — History** | Click 6h or 12h | Historical data, no forecast |
-| 8 | **Date range** | Pick dates in calendar | Chart for selected range |
-| 9 | **Alerts** | Select a sensor with alerts (red tile) | Alert cards below filter bar |
-| 10 | **Note action** | Click "Note" on alert | Green checkmark, alert disappears |
-| 11 | **Remove action** | Click "Remove" on alert | Alert disappears, cooldown starts |
-| 12 | **Status filters** | Click Critical / Warning / Normal | Only matching sensors shown |
-| 13 | **Reset** | Click "Reset" button | All filters cleared |
-| 14 | **Compliance** | Scroll to Live Compliance section | Gauge + stats + 7-day trend |
-| 15 | **Healthz** | `curl http://localhost:8051/healthz` | JSON with mysql and provider status |
+| 5 | **Sensor selection** | Click a sensor tile | KPIs appear (including Battery), chart loads |
+| 6 | **Chart — LIVE** | With sensor selected, click LIVE | Line chart with 2h history + 30-min forecast in 1h forward window |
+| 7 | **Chart — 1h/6h/12h/24h** | Click a time button | X-axis locked to full window even if data is sparse |
+| 8 | **Date range** | Pick dates in calendar | Chart for selected range; empty ranges show "No readings in this range" |
+| 9 | **Same-day date range** | Pick same start and end date | Full 24h (00:00–23:59) of data for that day |
+| 10 | **Alerts** | Select a sensor with alerts (red tile) | Alert cards below filter bar with timestamps in DB local time |
+| 11 | **Note action** | Click "Note" on alert | Green checkmark, alert disappears |
+| 12 | **Remove action** | Click "Remove" on alert | Alert disappears, cooldown starts |
+| 13 | **Status filters** | Click Critical / Warning / Normal | Only matching sensors shown |
+| 14 | **Reset** | Click "Reset" button | All filters cleared, returns to LIVE |
+| 15 | **Compliance** | Scroll to Live Compliance section | Gauge uses total sensors (offline reduces %). 7-day trend with no gaps |
+| 16 | **Healthz** | `curl http://localhost:8051/healthz` | JSON with mysql and provider status |
 
 ---
 
@@ -714,26 +639,13 @@ git push
 
 **File:** `.github/workflows/ci.yml`
 
-This workflow runs automatically on every Pull Request to `main` or `develop`. It also runs on pushes to `develop`.
-
-### What It Does (Step by Step)
+Runs on every PR to `main`/`develop` and on pushes to `develop`.
 
 ```
-Developer creates a Pull Request
-         │
-         ▼
-1. GitHub spins up a fresh Ubuntu machine
-2. Checks out your code
-3. Installs Python 3.10
-4. Installs all pip dependencies
-5. Runs ruff (linter) — catches style errors
-6. Runs pytest (161 tests) — catches bugs
-7. Runs sam validate — catches infrastructure template errors
-         │
-         ▼
-If ALL pass → Green checkmark ✓ on the PR
-If ANY fail → Red X on the PR (merge is blocked)
+PR created → Python 3.12 → pip install → ruff lint → pytest → Pass/Fail
 ```
+
+CI is intentionally simple — just lint + test. The Docker build happens in CD.
 
 ### How to Use It
 
@@ -803,27 +715,17 @@ This is useful for:
 - Re-deploying a server after config changes
 - Testing a deploy without tagging a release
 
-### What It Does (Step by Step)
+### What It Does
 
 ```
-1. Resolves targets:
-   - develop push    → ["dev"]
-   - main push       → ["staging"]
-   - v* tag          → ["prod-server1", "prod-server2", …]  (all prod servers)
-   - manual          → ["<selected target>"]
-
-2. Runs CI safety gate (once):
-   a. ruff check      — lint (code style)
-   b. pytest           — 161 unit tests
-
-3. For EACH target (parallel):
-   a. Authenticates to AWS using access keys (from that target's GitHub Environment secrets)
-   b. Runs "sam build"
-   c. Runs "sam deploy" using that target's section in samconfig.toml
-   d. Prints the deployed dashboard URL
+1. Resolves target (dev / staging / prod-server1)
+2. Installs SAM CLI (standalone installer — no Python needed)
+3. Authenticates to AWS (access keys from GitHub Environment secrets)
+4. Auto-deletes any ROLLBACK_COMPLETE stack (previous failed deploy)
+5. sam build → docker build (Dockerfile.lambda, Python 3.14 base)
+6. sam deploy → push image to ECR → update Lambda + API Gateway
+7. Prints dashboard URL
 ```
-
-> **Note:** `sam validate` runs in the CI pipeline (on PRs). The CD pipeline trusts that code merged to `develop`/`main` already passed CI.
 
 ### Deploying to Production (All Servers)
 
@@ -884,7 +786,6 @@ Developer writes code
   │ to develop       │             ┌──────────────────────┐
   └────────┬────────┘             │ 1. ruff (lint)       │
            │                       │ 2. pytest (161 tests)│
-           │                       │ 3. sam validate      │
            │                       └──────────┬───────────┘
            │                                  │
            │                       Pass? ──── Yes ──── ✓ Green check
@@ -1113,54 +1014,23 @@ aws lambda update-alias \
 
 ## Manual Deployment (Without CI/CD)
 
-If you want to deploy manually from your terminal without using GitHub Actions:
-
-### Step 1: Run Tests and Lint (Same as CI)
-
-Before deploying anything, make sure the code is clean — exactly the same checks the CI pipeline runs:
-
 ```bash
-cd TemperatureSensor/dashboard
+# 1. Validate
+make validate
 
-# 1a. Lint — checks code style (0 errors expected)
-python -m ruff check app/ tests/
-
-# 1b. Unit tests — catches bugs (158+ passed expected)
-python -m pytest tests/ -v --tb=short
-
-# 1c. Validate SAM template — catches infrastructure config errors
-sam validate --template-file ../infra/template.yaml --lint
-```
-
-**Do NOT proceed to Step 2 unless all three pass.** If any fail, fix the issues first.
-
-### Step 2: Build
-
-This packages the dashboard code into a Lambda-ready ZIP:
-
-```bash
-cd TemperatureSensor    # back to project root
+# 2. Build (Docker image for Lambda)
 sam build --template-file infra/template.yaml
-```
 
-You should see `Build Succeeded` at the end. The built artifacts go into `.aws-sam/build/`.
-
-### Step 3: Deploy
-
-```bash
+# 3. Deploy
 sam deploy \
   --config-env dev \
   --config-file infra/samconfig.toml \
   --parameter-overrides "MysqlPassword=YOUR_DB_PASSWORD"
 ```
 
-Replace `dev` with `staging`, `prod-server1`, etc. as needed.
+Replace `dev` with `staging`, `prod-server1`, etc. and set the actual password.
 
-**What happens during deploy:**
-1. SAM uploads the Lambda package to S3
-2. Creates/updates a CloudFormation stack
-3. Creates: Lambda, API Gateway, DynamoDB table, Secrets Manager secret (DB creds), CloudWatch alarm
-4. Prints the outputs (dashboard URL, table name, secret ARN, etc.)
+**What happens:** SAM pushes the Docker image to ECR, creates/updates the CloudFormation stack (Lambda, API Gateway, DynamoDB, Secrets Manager, CloudWatch alarm), and prints the dashboard URL.
 
 ### Step 4: Verify the Deployment
 
@@ -1185,12 +1055,12 @@ All steps combined for easy copy-paste:
 ```bash
 cd TemperatureSensor
 
-# Pre-deploy checks (same as CI)
+# Pre-deploy checks
 cd dashboard
 python -m ruff check app/ tests/
 python -m pytest tests/ -v --tb=short
-sam validate --template-file ../infra/template.yaml --lint
 cd ..
+sam validate --template-file infra/template.yaml --region us-east-1
 
 # Build + Deploy
 sam build --template-file infra/template.yaml
@@ -1218,7 +1088,11 @@ aws cloudformation describe-stacks \
 | **Blank chart on long date range** | Too many data points | Downsampling is automatic (2000 pts); check MySQL query limits |
 | **Location dropdown empty** | `name` column null/empty in DB | Ensure `name` is populated in `dg_gateway_data` |
 | **No sensors after login** | `client_id` mismatch | Verify `CLIENT_ID` matches `customer_key` values in DB |
-| **Compliance shows 0%** | All sensors offline | Expected — shows "Last Known" label |
+| **Compliance shows low %** | Offline sensors counted against total | Expected — offline sensors reduce compliance (2 offline + 1 in-range = 33.3%) |
+| **Sensors show offline but data exists** | Timezone mismatch between `NOW()` and `date_added` | Auto-detected — restart app to re-detect. Check `_detect_tz_offset()` logs |
+| **Navbar clock shows UTC** | DB unreachable on first tick | Auto-retries; if persistent, check DB connectivity |
+| **7-day trend has gaps** | No data for some days | Days with no data show 0% compliance (auto-filled) |
+| **Graph X-axis wrong range** | Old cache | Click Reset or refresh; X-axis is locked to requested window |
 | **`moto` import error** | Wrong version | `pip install 'moto>=5.0'` |
 | **MySQL connection timeout** | Aurora idle pruning | Auto-retry built in; restart app if persistent |
 | **Parquet not found (hybrid)** | S3 path wrong | Falls back to MySQL; check `PARQUET_BUCKET` |
@@ -1226,7 +1100,10 @@ aws cloudformation describe-stacks \
 | **Lambda cold start slow** | First request after idle | Normal (~3-5s); subsequent requests fast |
 | **Alerts not appearing** | DynamoDB table missing | Check `ALERTS_TABLE`; locally, moto auto-creates it |
 | **Cookie expired** | 30-day timeout | Officer revisits `/connect/{token}` |
-| **CI fails on "sam validate"** | SAM CLI not installed | The CI workflow installs it; check pip step |
+| **"Unzipped size must be smaller than 262144000 bytes"** | ZIP package, not container image | Ensure `PackageType: Image` in template.yaml and `Dockerfile.lambda` exists |
+| **ROLLBACK_COMPLETE stack** | Previous deploy failed | CD auto-deletes these. Manually: `aws cloudformation delete-stack --stack-name <name>` |
+| **Docker not running** | Docker daemon not started | Start Docker Desktop or `sudo systemctl start docker` |
+| **SAM build slow first time** | Pulling base image | First build downloads `python:3.14` Lambda image (~500 MB). Cached after that |
 | **CD "Waiting for review"** | Prod needs approval | Go to Actions → click "Review deployments" → Approve |
 | **CD "AccessDenied" error** | AWS keys invalid or missing permissions | Verify `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` in GitHub Secrets; check IAM user has `PowerUserAccess` + `IAMFullAccess` |
 
