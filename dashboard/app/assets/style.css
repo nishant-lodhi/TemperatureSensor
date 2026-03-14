@@ -319,3 +319,32 @@ html, body {
 
 /* Fix tooltip z-index */
 .js-plotly-plot .plotly .hoverlayer { z-index: 10 !important; }
+
+/* ── Plotly modebar — elegant, minimal ─────────────────── */
+.js-plotly-plot .modebar {
+    top: 4px !important;
+    right: 6px !important;
+}
+.js-plotly-plot .modebar-group {
+    background: rgba(255,255,255,0.85) !important;
+    backdrop-filter: blur(6px);
+    border-radius: 8px !important;
+    padding: 2px 4px !important;
+    box-shadow: 0 1px 6px rgba(0,0,0,0.08);
+    border: 1px solid rgba(0,0,0,0.06);
+    gap: 0 !important;
+}
+.js-plotly-plot .modebar-btn {
+    opacity: 0.45 !important;
+    transition: opacity 0.15s, transform 0.15s !important;
+}
+.js-plotly-plot .modebar-btn:hover {
+    opacity: 1 !important;
+    transform: scale(1.15);
+}
+.js-plotly-plot .modebar-btn path {
+    fill: #0d9488 !important;
+}
+.js-plotly-plot .modebar-btn.active path {
+    fill: #f97316 !important;
+}

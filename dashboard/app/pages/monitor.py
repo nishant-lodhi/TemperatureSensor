@@ -908,13 +908,23 @@ def render_chart(rd):
     from app.pages.charts import unified_chart
     rm = rd.get("range_mode", "live")
     h = 2 if rm == "live" else int(rm) if rm and rm.isdigit() else 2
+    revision_key = f"{rd.get('device_id', '')}-{rm}-{rd.get('since', '')}"
     fig = unified_chart(
         rd.get("readings", []), rd.get("forecast", []), rd.get("alerts", []),
         rm, rd.get("offline", False), cfg.CHART_HEIGHT_DEFAULT if h <= 48 else cfg.CHART_HEIGHT_EXTENDED,
         x_since=rd.get("since"), x_until=rd.get("until"),
+        ui_revision=revision_key,
     )
     return dbc.Card(
-        dcc.Graph(figure=fig, config={"displayModeBar": False}),
+        dcc.Graph(figure=fig, config={
+            "displayModeBar": "hover",
+            "displaylogo": False,
+            "modeBarButtonsToRemove": [
+                "pan2d", "lasso2d", "select2d",
+                "autoScale2d", "toImage",
+            ],
+            "scrollZoom": False,
+        }),
         className="wcard mb-2",
     )
 
